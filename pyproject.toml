@@ -5,9 +5,9 @@ description = "CS336 Assignment 1"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
-    "einops>=0.8",      # tensor operations
-    "einx>=0.4",        # more general tensor operations
-    "jaxtyping>=0.3",   # type hints for pytorch/jax/numpy
+    "einops>=0.8", # tensor operations
+    "einx>=0.4", # more general tensor operations
+    "jaxtyping>=0.3", # type hints for pytorch/jax/numpy
     "numpy>=2.4",
     "psutil>=7",
     "pytest>=9.0",
@@ -19,6 +19,7 @@ dependencies = [
     "wandb>=0.25",
     "ty>=0.0.26",
     "ruff>=0.15.8",
+    "rich>=15.0.0",
 ]
 
 [build-system]
@@ -44,6 +45,12 @@ line-length = 120
 [tool.ruff.lint.extend-per-file-ignores]
 # Also ignore `E402` in all `__init__.py` files.
 "__init__.py" = ["E402", "F401", "F403", "E501"]
+
+[dependency-groups]
+dev = [
+    "jupyter>=1.1.1",
+    "jupytext>=1.19.5",
+]
 
 [tool.ruff.lint]
 extend-select = ["UP"]
