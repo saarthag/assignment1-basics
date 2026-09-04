@@ -50,6 +50,7 @@ line-length = 120
 dev = [
     "jupyter>=1.1.1",
     "jupytext>=1.19.5",
+    "py-spy>=0.4.2",
 ]
 
 [tool.ruff.lint]
