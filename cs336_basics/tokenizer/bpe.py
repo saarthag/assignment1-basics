@@ -73,7 +73,7 @@ def pre_tokenize_chunk(
             sub_chunks = re2.split("|".join(re2.escape(s) for s in special_tokens), content)
 
         for c in sub_chunks:
-            chunk_counter.update(tuple(bytes([b]) for b in m[0].encode("utf-8")) for m in re2.finditer(PAT, c))
+            chunk_counter.update(tuple(m[0].encode("utf-8")) for m in re2.finditer(PAT, c))
 
         return chunk_counter
 
@@ -94,18 +94,6 @@ def pre_tokenize(input_path: os.PathLike, special_tokens: list[str] = []) -> Cou
         return pre_tokens
 
 
-class BPWrapper:
-    def __init__(self, bp: tuple[bytes, bytes]):
-        self.bp = bp
-
-    def __lt__(self, other: "BPWrapper"):
-        # return self.bp[0] + self.bp[1] > other.bp[0] + other.bp[1]
-        return self.bp > other.bp
-
-    def __repr__(self):
-        return repr(self.bp)
-
-
 def train_bpe_fast(
     input_path: str | os.PathLike, vocab_size: int, special_tokens: list[str]
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
@@ -113,7 +101,7 @@ def train_bpe_fast(
         256 + i: st.encode("utf-8") for i, st in enumerate(special_tokens)
     }
     vocab_size_cur = len(vocab)
-    merge_pairs: list[tuple[bytes, bytes]] = []
+    merge_pairs: list[tuple[int, int]] = []
 
     start_time = time.perf_counter()
     pre_tokens_raw = pre_tokenize(Path(input_path), special_tokens=special_tokens)
@@ -122,9 +110,9 @@ def train_bpe_fast(
     # pre-allocate since size is known
     pre_tokens = [None] * len(pre_tokens_raw)
     # index of all positions (pre_tokens index) of a byte pair
-    bp_pos_index: dict[tuple[bytes, bytes], list[int]] = defaultdict(list)
+    bp_pos_index: dict[tuple[int, int], list[int]] = defaultdict(list)
     # index of all counts of a byte pair
-    bp_cnt_index: dict[tuple[bytes, bytes], int] = Counter()
+    bp_cnt_index: dict[tuple[int, int], int] = Counter()
 
     # process and fill raw pre-tokens into pre_tokens
     i = 0
@@ -138,6 +126,17 @@ def train_bpe_fast(
 
         pre_tokens[i] = (bp_list, cnt)
         i += 1
+
+    class BPWrapper:
+        def __init__(self, bp: tuple[int, int]):
+            self.bp = bp
+
+        def __lt__(self, other: "BPWrapper"):
+            # return self.bp[0] + self.bp[1] > other.bp[0] + other.bp[1]
+            return tuple(vocab[b] for b in self.bp) > tuple(vocab[b] for b in other.bp)
+
+        def __repr__(self):
+            return repr(self.bp)
 
     # max-heap to store byte pair counts
     # count is inverted and the byte pair is stored in a wrapper class to emulate a max-heap
@@ -156,8 +155,8 @@ def train_bpe_fast(
         best_bp = top[1].bp
         # update vocabulary
         merge_pairs.append(best_bp)
-        new_token = best_bp[0] + best_bp[1]
-        vocab[vocab_size_cur] = new_token
+        vocab[vocab_size_cur] = vocab[best_bp[0]] + vocab[best_bp[1]]
+        new_token = vocab_size_cur
         vocab_size_cur += 1
 
         heap_candidates = []
@@ -208,7 +207,7 @@ def train_bpe_fast(
     print("merge_niters", merge_niters)
     print("merge_periter", merge_tottime / merge_niters)
 
-    return vocab, merge_pairs
+    return vocab, [(vocab[mp[0]], vocab[mp[1]]) for mp in merge_pairs]
 
 
 def train_bpe_naive(
