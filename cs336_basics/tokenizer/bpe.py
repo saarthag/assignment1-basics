@@ -1,13 +1,19 @@
-import os
-import regex as re2
-from pathlib import Path
-from collections import Counter, defaultdict
-from itertools import pairwise, compress, repeat
-from rich.pretty import pprint
-from concurrent.futures import ProcessPoolExecutor
-import time
 import heapq
+import os
+import tempfile
+import time
+from collections import Counter, defaultdict
+from collections.abc import Iterable, Iterator
+from concurrent.futures import ProcessPoolExecutor
+from itertools import chain, compress, cycle, islice, pairwise, repeat
+from pathlib import Path
 from typing import BinaryIO
+
+import regex as re2
+from rich.pretty import pprint
+
+PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+re2_PAT = re2.compile(PAT)
 
 
 def find_chunk_boundaries(
@@ -58,11 +64,9 @@ def find_chunk_boundaries(
 
 
 def pre_tokenize_chunk(
-    input_path: os.PathLike, start: int, end: int, special_tokens: list[str] = []
-) -> Counter[tuple[bytes, ...]]:
-    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-
-    chunk_counter = Counter()
+    input_path: os.PathLike, start: int, end: int, special_tokens: list[str] | None = None
+) -> Counter[tuple[int, ...]]:
+    special_tokens = special_tokens or []
 
     with open(input_path, "rb") as f:
         f.seek(start)
@@ -72,13 +76,12 @@ def pre_tokenize_chunk(
         if len(special_tokens) > 0:
             sub_chunks = re2.split("|".join(re2.escape(s) for s in special_tokens), content)
 
-        for c in sub_chunks:
-            chunk_counter.update(tuple(m[0].encode("utf-8")) for m in re2.finditer(PAT, c))
+        pre_tokens = Counter(tuple(m[0].encode("utf-8")) for c in sub_chunks for m in re2_PAT.finditer(c))
 
-        return chunk_counter
+        return pre_tokens
 
 
-def pre_tokenize(input_path: os.PathLike, special_tokens: list[str] = []) -> Counter[tuple[bytes]]:
+def pre_tokenize(input_path: os.PathLike, special_tokens: list[str] | None = None) -> Counter[tuple[int, ...]]:
     with open(input_path, "rb") as f:
         num_processes = os.cpu_count() or 4
         boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
@@ -104,11 +107,11 @@ def train_bpe_fast(
     merge_pairs: list[tuple[int, int]] = []
 
     start_time = time.perf_counter()
-    pre_tokens_raw = pre_tokenize(Path(input_path), special_tokens=special_tokens)
+    pre_tokens_tmp = Counter(pre_tokenize(Path(input_path), special_tokens=special_tokens))
     print("pre_tokenize", time.perf_counter() - start_time)
 
     # pre-allocate since size is known
-    pre_tokens = [None] * len(pre_tokens_raw)
+    pre_tokens = [None] * len(pre_tokens_tmp)
     # index of all positions (pre_tokens index) of a byte pair
     bp_pos_index: dict[tuple[int, int], list[int]] = defaultdict(list)
     # index of all counts of a byte pair
@@ -116,7 +119,7 @@ def train_bpe_fast(
 
     # process and fill raw pre-tokens into pre_tokens
     i = 0
-    for tok, cnt in pre_tokens_raw.items():
+    for tok, cnt in pre_tokens_tmp.items():
         bp_list = [None] * (len(tok) - 1)
 
         for j, bp in enumerate(pairwise(tok)):
@@ -125,7 +128,7 @@ def train_bpe_fast(
             bp_cnt_index[bp] += cnt
 
         pre_tokens[i] = (bp_list, cnt)
-        i += 1
+        i += 1  # noqa: SIM113
 
     class BPWrapper:
         def __init__(self, bp: tuple[int, int]):
@@ -210,46 +213,111 @@ def train_bpe_fast(
     return vocab, [(vocab[mp[0]], vocab[mp[1]]) for mp in merge_pairs]
 
 
-def train_bpe_naive(
-    input_path: str | os.PathLike, vocab_size: int, special_tokens: list[str]
-) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-    vocab = {i: i.to_bytes(1) for i in range(256)} | {
-        256 + i: st.encode("utf-8") for i, st in enumerate(special_tokens)
-    }
-    vocab_size_cur = len(vocab)
-    merge_pairs: list[tuple[bytes, bytes]] = []
+def roundrobin(*iterables):
+    """Visit input iterables in a cycle until each is exhausted.
 
-    pre_tokens = pre_tokenize(Path(input_path), special_tokens=special_tokens)
+        >>> list(roundrobin('ABC', 'D', 'EF'))
+        ['A', 'D', 'E', 'B', 'F', 'C']
 
-    while vocab_size_cur < vocab_size:
-        bp_cnt = Counter()
+    This function produces the same output as :func:`interleave_longest`, but
+    may perform better for some inputs (in particular when the number of
+    iterables is small).
 
-        for k, cnt in pre_tokens.items():
-            for p in pairwise(k):
-                bp_cnt[p] += cnt
+    """
+    # Algorithm credited to George Sakkis
+    iterators = map(iter, iterables)
+    for num_active in range(len(iterables), 0, -1):
+        iterators = cycle(islice(iterators, num_active))
+        yield from map(next, iterators)
 
-        best_bp = max((cnt, bp) for bp, cnt in bp_cnt.items())[1]
 
-        merge_pairs.append(best_bp)
-        vocab[vocab_size_cur] = best_bp[0] + best_bp[1]
-        vocab_size_cur += 1
+class Tokenizer:
+    def __init__(
+        self, vocab: dict[int, bytes], merges: list[tuple[bytes, bytes]], special_tokens: list[str] | None = None
+    ):
+        self.vocab = vocab
+        self.vocab_index = {v: i for i, v in vocab.items()}
+        self.merges = merges
+        self.merges_rank_index = {mp: i for i, mp in enumerate(merges)}
+        self.special_tokens = sorted(special_tokens or [], key=len, reverse=True)
 
-        pre_tokens_upd = {}
-        for k in pre_tokens:
-            k_upd = []
-            num_tokens = len(k)
+    def encode(self, text: str) -> list[int]:
+        encoded: list[int] = []
+        cache: dict[tuple[bytes, ...], list[int]] = {}
 
-            i = 0
-            while i < num_tokens:
-                if i < num_tokens - 1 and k[i] == best_bp[0] and k[i + 1] == best_bp[1]:
-                    k_upd.append(best_bp[0] + best_bp[1])
-                    i += 1
+        re2_split_special = re2.compile("(" + "|".join(re2.escape(s) for s in self.special_tokens) + ")")
+
+        def text_iter():
+            chunks = [text]
+            if len(self.special_tokens) > 0:
+                chunks = re2_split_special.split(text)
+
+            for c in chunks:
+                if c in self.special_tokens:
+                    yield (c.encode("utf-8"),)
                 else:
-                    k_upd.append(k[i])
-                i += 1
+                    yield from (tuple(bytes([b]) for b in m[0].encode("utf-8")) for m in re2_PAT.finditer(c))
 
-            pre_tokens_upd[tuple(k_upd)] = pre_tokens[k]
+        MAX_RANK = len(self.merges)
 
-        pre_tokens = pre_tokens_upd
+        for tok in text_iter():
+            # print("tok", tok, sep="=")
+            if len(tok) == 1:
+                encoded.append(self.vocab_index[tok[0]])
+                continue
 
-    return vocab, merge_pairs
+            if tok in cache:
+                encoded.extend(cache[tok])
+                continue
+
+            bp_list = [bp for bp in pairwise(tok)]
+            n_bp = len(bp_list)
+
+            for _ in range(n_bp):
+                # print("bp_list", bp_list, sep="=")
+                best_bp_tup = min((self.merges_rank_index.get(bp, MAX_RANK), bp) for bp in bp_list)
+
+                if best_bp_tup[0] == MAX_RANK:
+                    break
+
+                best_bp = best_bp_tup[1]
+                new_token = best_bp[0] + best_bp[1]
+                # if only a single byte pair is remaining
+                if len(bp_list) == 1:
+                    bp_list[0] = (new_token,)
+                    break
+
+                keep = [1] * len(bp_list)
+
+                for i, bp in enumerate(bp_list):
+                    if bp == best_bp:
+                        keep[i] = 0
+
+                        if i > 0:
+                            left_bp_upd = (bp_list[i - 1][0], new_token)
+                            bp_list[i - 1] = left_bp_upd
+
+                        if i < len(bp_list) - 1:
+                            right_bp_upd = (new_token, bp_list[i + 1][1])
+                            bp_list[i + 1] = right_bp_upd
+
+                bp_list_upd = list(compress(bp_list, keep))
+                bp_list = bp_list_upd
+
+            tok_encoded = [self.vocab_index[bp[0]] for bp in bp_list]
+            # append the last element of the bp list
+            if len(bp_list[-1]) > 1:
+                tok_encoded.append(self.vocab_index[bp_list[-1][1]])
+
+            cache[tok] = tok_encoded
+            encoded.extend(tok_encoded)
+
+        # print("encoded",encoded,sep="=")
+        return encoded
+
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        pass
+
+    def decode(self, ids: list[int]) -> str:
+        encoded_str = b"".join(self.vocab[i] for i in ids)
+        return encoded_str.decode("utf-8", errors="replace")

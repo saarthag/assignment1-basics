@@ -41,6 +41,7 @@ addopts = "-s"
 
 [tool.ruff]
 line-length = 120
+extend-exclude = ["tests/adapters.py"]
 
 [tool.ruff.lint.extend-per-file-ignores]
 # Also ignore `E402` in all `__init__.py` files.
@@ -50,6 +51,7 @@ line-length = 120
 dev = [
     "jupyter>=1.1.1",
     "jupytext>=1.19.5",
+    "prek>=0.5.2",
     "py-spy>=0.4.2",
 ]
 
