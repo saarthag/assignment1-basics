@@ -1,7 +1,7 @@
 #! /usr/bin/env python
 import pickle
+from concurrent.futures import ProcessPoolExecutor
 from io import SEEK_END, SEEK_SET
-from itertools import cycle, islice
 from pathlib import Path
 
 from cs336_basics.tokenizer.bpe import Tokenizer, train_bpe_fast
@@ -40,17 +40,12 @@ def run_tokenizer_encode():
         merge_pairs = pickle.load(f_mp)
 
     sample_data_dir = Path("/Users/saarthak/Projects/stanford-cs336/assignment1-basics/data")
-    sample_file_name = Path("tinystories_100mb.txt")
+    sample_file_name = Path("tinystories_2.txt")
 
     tokenizer = Tokenizer(vocab, merge_pairs, special_tokens=["<|endoftext|>"])
 
     with open(sample_data_dir / sample_file_name) as f:
-        f.seek(0, SEEK_END)
-        tot_bytes = f.tell()
-
-        f.seek(0, SEEK_SET)
-        enc = tokenizer.encode(text=f.read())
-        print("compression ratio=", tot_bytes / len(enc), sep="")
+        print(list(tokenizer.encode_iterable(f, batch_size=20)))
 
 
 if __name__ == "__main__":

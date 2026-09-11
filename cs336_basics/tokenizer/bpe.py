@@ -2,10 +2,10 @@ import heapq
 import os
 import tempfile
 import time
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ProcessPoolExecutor
-from itertools import chain, compress, cycle, islice, pairwise, repeat
+from itertools import chain, compress, cycle, islice, pairwise, repeat, zip_longest
 from pathlib import Path
 from typing import BinaryIO
 
@@ -213,33 +213,20 @@ def train_bpe_fast(
     return vocab, [(vocab[mp[0]], vocab[mp[1]]) for mp in merge_pairs]
 
 
-def roundrobin(*iterables):
-    """Visit input iterables in a cycle until each is exhausted.
-
-        >>> list(roundrobin('ABC', 'D', 'EF'))
-        ['A', 'D', 'E', 'B', 'F', 'C']
-
-    This function produces the same output as :func:`interleave_longest`, but
-    may perform better for some inputs (in particular when the number of
-    iterables is small).
-
-    """
-    # Algorithm credited to George Sakkis
-    iterators = map(iter, iterables)
-    for num_active in range(len(iterables), 0, -1):
-        iterators = cycle(islice(iterators, num_active))
-        yield from map(next, iterators)
-
-
 class Tokenizer:
     def __init__(
         self, vocab: dict[int, bytes], merges: list[tuple[bytes, bytes]], special_tokens: list[str] | None = None
     ):
         self.vocab = vocab
         self.vocab_index = {v: i for i, v in vocab.items()}
+
         self.merges = merges
         self.merges_rank_index = {mp: i for i, mp in enumerate(merges)}
-        self.special_tokens = sorted(special_tokens or [], key=len, reverse=True)
+
+        self.special_tokens = sorted(special_tokens or [], key=lambda s: -len(s))
+        self.special_tokens_prefix = sorted(
+            (st[: i + 1] for st in self.special_tokens for i in range(len(st) - 1)), key=lambda s: -len(s)
+        )
 
     def encode(self, text: str) -> list[int]:
         encoded: list[int] = []
@@ -315,8 +302,33 @@ class Tokenizer:
         # print("encoded",encoded,sep="=")
         return encoded
 
-    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
-        pass
+    def encode_iterable(
+        self, iterable: Iterable[str], batch_size: int = 500, max_workers: int | None = None
+    ) -> Iterator[int]:
+        def batched_token_aware():
+            pt_iter = (m[0] for elem in iterable for m in re2_PAT.finditer(elem))
+            pt_pending = deque()
+
+            while batch := list(islice(pt_iter, batch_size)):
+                pt_pending.extend(batch)
+                batch_str = "".join(pt_pending)
+                pt_pending.clear()
+
+                n_retain = None
+
+                for pre in self.special_tokens_prefix:
+                    if batch_str.endswith(pre):
+                        n_retain = len(pre)
+                        break
+
+                if n_retain is not None:
+                    yield batch_str[:-n_retain]
+                    pt_pending.extend(batch_str[-n_retain:])
+                else:
+                    yield batch_str
+
+        with ProcessPoolExecutor() as executor:
+            yield from chain.from_iterable(executor.map(self.encode, batched_token_aware()))
 
     def decode(self, ids: list[int]) -> str:
         encoded_str = b"".join(self.vocab[i] for i in ids)
