@@ -1,5 +1,6 @@
 import heapq
 import os
+import pickle
 import tempfile
 import time
 from collections import Counter, defaultdict, deque
@@ -230,7 +231,10 @@ class Tokenizer:
 
     def encode(self, text: str) -> list[int]:
         encoded: list[int] = []
+
         cache: dict[tuple[bytes, ...], list[int]] = {}
+        cache_hits = 0
+        cache_misses = 0
 
         re2_split_special = re2.compile("(" + "|".join(re2.escape(s) for s in self.special_tokens) + ")")
 
@@ -255,7 +259,10 @@ class Tokenizer:
 
             if tok in cache:
                 encoded.extend(cache[tok])
+                cache_hits += 1
                 continue
+
+            cache_misses += 1
 
             bp_list = [bp for bp in pairwise(tok)]
             n_bp = len(bp_list)
@@ -299,11 +306,13 @@ class Tokenizer:
             cache[tok] = tok_encoded
             encoded.extend(tok_encoded)
 
-        # print("encoded",encoded,sep="=")
+        # with open("cache_stats", "a") as f_cache:
+        #     f_cache.write(f"CH{cache_hits * 100 / (cache_hits + cache_misses):.3f}%\n")
+
         return encoded
 
     def encode_iterable(
-        self, iterable: Iterable[str], batch_size: int = 500, max_workers: int | None = None
+        self, iterable: Iterable[str], batch_size: int = 100000, max_workers: int | None = None
     ) -> Iterator[int]:
         def batched_token_aware():
             pt_iter = (m[0] for elem in iterable for m in re2_PAT.finditer(elem))
@@ -327,8 +336,21 @@ class Tokenizer:
                 else:
                     yield batch_str
 
-        with ProcessPoolExecutor() as executor:
-            yield from chain.from_iterable(executor.map(self.encode, batched_token_aware()))
+        max_workers = max_workers or os.cpu_count() or 4
+
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            max_jobs = max_workers
+            batch_stream = batched_token_aware()
+            # populate initial set of jobs
+            encoding_queue = deque(executor.submit(self.encode, batch) for batch in islice(batch_stream, max_jobs))
+
+            while len(encoding_queue) > 0:
+                top_job = encoding_queue.popleft()
+                yield from top_job.result()
+
+                next_batch = next(batch_stream, None)
+                if next_batch is not None:
+                    encoding_queue.append(executor.submit(self.encode, next_batch))
 
     def decode(self, ids: list[int]) -> str:
         encoded_str = b"".join(self.vocab[i] for i in ids)

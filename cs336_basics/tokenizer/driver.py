@@ -1,8 +1,12 @@
 #! /usr/bin/env python
+import os
 import pickle
+import sys
+import time
 from concurrent.futures import ProcessPoolExecutor
-from io import SEEK_END, SEEK_SET
 from pathlib import Path
+
+import numpy as np
 
 from cs336_basics.tokenizer.bpe import Tokenizer, train_bpe_fast
 
@@ -40,14 +44,34 @@ def run_tokenizer_encode():
         merge_pairs = pickle.load(f_mp)
 
     sample_data_dir = Path("/Users/saarthak/Projects/stanford-cs336/assignment1-basics/data")
-    sample_file_name = Path("tinystories_2.txt")
+    sample_file_name = Path(sys.argv[1])
 
     tokenizer = Tokenizer(vocab, merge_pairs, special_tokens=["<|endoftext|>"])
 
     with open(sample_data_dir / sample_file_name) as f:
-        print(list(tokenizer.encode_iterable(f, batch_size=20)))
+        # print("encode")
+        # start_time = time.perf_counter()
+        # n_tokens = len(tokenizer.encode(f.read()))
+        # print(f"{sample_file_name}: {n_tokens:,} tokens, {time.perf_counter() - start_time}s")
+        #
+        # for mw in (2**i for i in range(6)):
+        f.seek(0, os.SEEK_SET)
+        mw = 4
+
+        start_time = time.perf_counter()
+        n_tokens = sum(1 for _ in tokenizer.encode_iterable(f, max_workers=mw))
+        tot_time = time.perf_counter() - start_time
+        tot_bytes = f.tell()
+
+        print(f"{sample_file_name}: {n_tokens:,} tokens, {tot_time:.3f}s, max_workers={mw}")
+        print(f"compression ratio={tot_bytes / n_tokens:.3f}")
+        print(f"throughput={tot_bytes / tot_time:,.3f} bytes/s")
 
 
 if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("filename required!")
+        sys.exit(1)
+
     run_tokenizer_encode()
     # train_bpe_tinystories()
