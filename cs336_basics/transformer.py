@@ -1,8 +1,8 @@
 import math
 
 import torch
-from einops import einsum
-from jaxtyping import Float
+from einops import einsum, rearrange
+from jaxtyping import Float, Int
 from torch import Tensor, nn
 
 
@@ -114,3 +114,25 @@ class SwiGLU(nn.Module):
         w3_x = einsum(x, self.weights_3, "... d_model, d_ff d_model -> ... d_ff")
 
         return einsum(silu_w1_x * w3_x, self.weights_2, "... d_ff, d_model d_ff -> ... d_model")
+
+
+class RotaryPositionalEmbedding(nn.Module):
+    def __init__(self, theta: float, d_k: int, max_seq_len: int, device: torch.device | None = None):
+        super().__init__()
+        self.d_k = d_k
+        exp = torch.arange(d_k >> 1, device=device) * 2 / d_k
+        angles = einsum(torch.arange(max_seq_len, device=device), theta**-exp, "max_seq_len, dk2 -> max_seq_len dk2")
+
+        self.register_buffer("sin_precomp", torch.sin(angles), persistent=False)
+        self.register_buffer("cos_precomp", torch.cos(angles), persistent=False)
+
+    def forward(self, x: Float[Tensor, " ... seq_len d_k"], token_positions: Int[Tensor, " ... seq_len"]) -> Tensor:
+        sin_ord = self.get_buffer("sin_precomp")[token_positions]
+        cos_ord = self.get_buffer("cos_precomp")[token_positions]
+
+        x_pair = rearrange(x, "... seq_len (dk2 p) -> ... seq_len dk2 p", dk2=(self.d_k >> 1), p=2)
+        x_pair_flip = x_pair[..., [1, 0]] * torch.tensor([-1, 1])
+        x_pair_roped = x_pair * cos_ord.unsqueeze(dim=-1) + x_pair_flip * sin_ord.unsqueeze(dim=-1)
+
+        x_roped = rearrange(x_pair_roped, "... dk2 p -> ... (dk2 p)")
+        return x_roped
