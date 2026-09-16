@@ -134,5 +134,9 @@ class RotaryPositionalEmbedding(nn.Module):
         x_pair_flip = x_pair[..., [1, 0]] * torch.tensor([-1, 1])
         x_pair_roped = x_pair * cos_ord.unsqueeze(dim=-1) + x_pair_flip * sin_ord.unsqueeze(dim=-1)
 
-        x_roped = rearrange(x_pair_roped, "... dk2 p -> ... (dk2 p)")
-        return x_roped
+        return rearrange(x_pair_roped, "... dk2 p -> ... (dk2 p)")
+
+
+def my_softmax(x: Tensor, dim: int):
+    exp_x = torch.exp(x - x.max(dim=dim, keepdim=True).values)
+    return exp_x * exp_x.sum(dim=dim, keepdim=True).reciprocal()
