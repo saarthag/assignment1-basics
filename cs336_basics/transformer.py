@@ -131,7 +131,7 @@ class RotaryPositionalEmbedding(nn.Module):
         cos_ord = self.get_buffer("cos_precomp")[token_positions]
 
         x_pair = rearrange(x, "... seq_len (dk2 p) -> ... seq_len dk2 p", dk2=(self.d_k >> 1), p=2)
-        x_pair_flip = x_pair[..., [1, 0]] * torch.tensor([-1, 1])
+        x_pair_flip = x_pair[..., [1, 0]] * torch.tensor([-1, 1], device=x_pair.device)
         x_pair_roped = x_pair * cos_ord.unsqueeze(dim=-1) + x_pair_flip * sin_ord.unsqueeze(dim=-1)
 
         return rearrange(x_pair_roped, "... dk2 p -> ... (dk2 p)")
@@ -146,10 +146,73 @@ def scaled_dot_product_attention(
     Q: Float[Tensor, " ... queries d_k"],
     K: Float[Tensor, " ... keys d_k"],
     V: Float[Tensor, " ... keys d_v"],
-    mask: Bool[Tensor, " ... queries keys"] | None,
+    mask: Bool[Tensor, " ... queries keys"] | None = None,
 ) -> Float[Tensor, " ... queries d_v"]:
     d_k = Q.shape[-1]
-    sdp = einsum(Q, K, "... q d_k, ... k d_k -> ... q k") / math.sqrt(d_k)
+    sdp = einsum(Q, K, "... queries d_k, ... keys d_k -> ... queries keys") / math.sqrt(d_k)
     pre_softmax = sdp.masked_fill(~mask, -torch.inf) if mask is not None else sdp
 
-    return einsum(my_softmax(pre_softmax, dim=-1), V, "... q k, ... k d_v -> ... q d_v")
+    return einsum(my_softmax(pre_softmax, dim=-1), V, "... queries keys, ... keys d_v -> ... queries d_v")
+
+
+class MultiHeadSelfAttention(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        q_proj_weight: Float[Tensor, " d_model d_model"],
+        k_proj_weight: Float[Tensor, " d_model d_model"],
+        v_proj_weight: Float[Tensor, " d_model d_model"],
+        o_proj_weight: Float[Tensor, " d_model d_model"],
+        max_seq_len: int | None = None,
+        theta: float | None = None,
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.max_seq_len = max_seq_len
+        self.theta = theta
+        self.query_weight = nn.Parameter(q_proj_weight)
+        self.key_weight = nn.Parameter(k_proj_weight)
+        self.value_weight = nn.Parameter(v_proj_weight)
+        self.o_weight = nn.Parameter(o_proj_weight)
+        self.rope = None
+        if self.theta is not None and self.max_seq_len is not None:
+            self.rope = RotaryPositionalEmbedding(
+                theta=self.theta, d_k=self.d_model // self.num_heads, max_seq_len=self.max_seq_len
+            )
+
+    def forward(
+        self,
+        x: Float[Tensor, " ... sequence_length d_model"],
+        token_positions: Int[Tensor, " ... sequence_length"] | None = None,
+    ) -> Float[Tensor, " ... sequence_length d_model"]:
+        # project x into query/key/value subspaces
+        # here d_out = h.d_k = h.d_model/h = d_model
+        x_query = einsum(
+            x, self.query_weight, "... sequence_length d_model, d_out d_model -> ... sequence_length d_out"
+        )
+        x_key = einsum(x, self.key_weight, "... sequence_length d_model, d_out d_model -> ... sequence_length d_out")
+        x_value = einsum(
+            x, self.value_weight, "... sequence_length d_model, d_out d_model -> ... sequence_length d_out"
+        )
+
+        # split into attention heads
+        x_query_heads = rearrange(x_query, "... sequence_length (h d_k) -> ... h sequence_length d_k", h=self.num_heads)
+        x_key_heads = rearrange(x_key, "... sequence_length (h d_k) -> ... h sequence_length d_k", h=self.num_heads)
+        x_value_heads = rearrange(x_value, "... sequence_length (h d_v) -> ... h sequence_length d_v", h=self.num_heads)
+
+        if self.rope is not None:
+            assert token_positions is not None, "token_positions must be provided for RoPE"
+            x_query_heads = self.rope.forward(x_query_heads, token_positions=token_positions)
+            x_key_heads = self.rope.forward(x_key_heads, token_positions=token_positions)
+
+        seq_len = x.shape[-2]
+        # mask will automatically broadcast over other dims
+        mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.bool, device=x.device))
+        sdpa = rearrange(
+            scaled_dot_product_attention(Q=x_query_heads, K=x_key_heads, V=x_value_heads, mask=mask),
+            "... h sequence_length d_v -> ... sequence_length (h d_v)",
+        )
+
+        return einsum(sdpa, self.o_weight, "... sequence_length d_model, d_out d_model -> ... sequence_length d_out")
