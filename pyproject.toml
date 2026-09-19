@@ -49,10 +49,12 @@ extend-exclude = ["tests/adapters.py"]
 
 [dependency-groups]
 dev = [
+    "humanize>=4.16.0",
     "jupyter>=1.1.1",
     "jupytext>=1.19.5",
     "prek>=0.5.2",
     "py-spy>=0.4.2",
+    "quantiphy>=2.23",
 ]
 
 [tool.ruff.lint]

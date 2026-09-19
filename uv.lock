@@ -287,10 +287,12 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "humanize" },
     { name = "jupyter" },
     { name = "jupytext" },
     { name = "prek" },
     { name = "py-spy" },
+    { name = "quantiphy" },
 ]
 
 [package.metadata]
@@ -314,10 +316,12 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "humanize", specifier = ">=4.16.0" },
     { name = "jupyter", specifier = ">=1.1.1" },
     { name = "jupytext", specifier = ">=1.19.5" },
     { name = "prek", specifier = ">=0.5.2" },
     { name = "py-spy", specifier = ">=0.4.2" },
+    { name = "quantiphy", specifier = ">=2.23" },
 ]
 
 [[package]]
@@ -547,6 +551,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/b1/df/48c586a5fe32a0f01324ee087459e112ebb7224f646c0b5023f5e79e9956/httpx-0.28.1.tar.gz", hash = "sha256:75e98c5f16b0f35b567856f597f06ff2270a374470a5c2392242528e3e3e42fc", size = 141406 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/2a/39/e50c7c3a983047577ee07d2a9e53faf5a69493943ec3f6a384bdc792deb2/httpx-0.28.1-py3-none-any.whl", hash = "sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad", size = 73517 },
+]
+
+[[package]]
+name = "humanize"
+version = "4.16.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/0a/ea/13a1ef3c12d12662905801495283530251918b70d62d368f1d2e0272c70d/humanize-4.16.0.tar.gz", hash = "sha256:7dc2244a2f84a4bfb1d36c37bac80cd78e35cdc5c119206d87b018e1445f3a3f", size = 89515 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b0/aa/0b7365d30fed43e7a3449aba1fe20a0a7174d9cf13e282af4e69ac825441/humanize-4.16.0-py3-none-any.whl", hash = "sha256:353eb2f34c09d098b2880eee8bef21832eae6d174f48c5762fff7e5fcb74d01d", size = 137209 },
 ]
 
 [[package]]
@@ -1727,6 +1740,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/52/aa/3918b5ac7f9987bd9c421b065074fd7409ded88f856f2c704a24341877ec/pyzmq-27.2.0-cp312-abi3-win_arm64.whl", hash = "sha256:348d6fd3e4b81ae4580622ea8c2ea60224e84b2ac1b3be4482e6edc7de06e7a3", size = 556006 },
     { url = "https://files.pythonhosted.org/packages/83/5e/d0541596b48c5a19f85dcbea83d6673d8e91681cdf853eb194c31fc9766e/pyzmq-27.2.0-cp313-cp313-android_24_arm64_v8a.whl", hash = "sha256:c551b9e2f86dc625fcb1a032c0d68042678caf96a8dd7c28796766b673bd5b52", size = 1127193 },
     { url = "https://files.pythonhosted.org/packages/50/9f/8c7411bb283982d46e6d56dca6a095678c87eb0398daead12776d9881ac2/pyzmq-27.2.0-cp313-cp313-android_24_x86_64.whl", hash = "sha256:288cc790da0e3064a14a38ddc56ba169dada8c8af4cb86518db2bcbd380eedbb", size = 1166833 },
+]
+
+[[package]]
+name = "quantiphy"
+version = "2.23"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/80/3f/4460c2ffa8a836e7dccba61d8011178b10054d670909e22977303c3d3541/quantiphy-2.23.tar.gz", hash = "sha256:c883246c28a70a132f85b112e00170b89cbaed9bcd2e01cb52638f6b6b290bad", size = 43794 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2c/7c/87ef9a2a7f0b8498cb72ba2a74612ce44996b647b218516c520c23acd66f/quantiphy-2.23-py3-none-any.whl", hash = "sha256:e6924e1ae0942b96bbb5f41fb73578247fdcb1a22792e1505764b88e39864156", size = 43630 },
 ]
 
 [[package]]

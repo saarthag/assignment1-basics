@@ -23,7 +23,8 @@ class Linear(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return einsum(x, self.weight, "... d_in, d_out d_in -> ... d_out")
+        out = einsum(x, self.weight, "... d_in, d_out d_in -> ... d_out")
+        return out
 
 
 class Embedding(nn.Module):
@@ -89,11 +90,20 @@ class SwiGLU(nn.Module):
 
 
 class RotaryPositionalEmbedding(nn.Module):
-    def __init__(self, theta: float, d_k: int, max_seq_len: int, device: torch.device | None = None):
+    def __init__(
+        self,
+        theta: float,
+        d_k: int,
+        max_seq_len: int,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
         super().__init__()
         self.d_k = d_k
-        exp = torch.arange(d_k >> 1, device=device) * 2 / d_k
-        angles = einsum(torch.arange(max_seq_len, device=device), theta**-exp, "max_seq_len, dk2 -> max_seq_len dk2")
+        exp = torch.arange(d_k >> 1, device=device, dtype=dtype) * 2 / d_k
+        angles = einsum(
+            torch.arange(max_seq_len, device=device, dtype=dtype), theta**-exp, "max_seq_len, dk2 -> max_seq_len dk2"
+        )
 
         self.register_buffer("sin_precomp", torch.sin(angles), persistent=False)
         self.register_buffer("cos_precomp", torch.cos(angles), persistent=False)
@@ -124,7 +134,8 @@ def scaled_dot_product_attention(
     sdp = einsum(Q, K, "... queries d_k, ... keys d_k -> ... queries keys") / math.sqrt(d_k)
     pre_softmax = sdp.masked_fill(~mask, -torch.inf) if mask is not None else sdp
 
-    return einsum(my_softmax(pre_softmax, dim=-1), V, "... queries keys, ... keys d_v -> ... queries d_v")
+    out = einsum(my_softmax(pre_softmax, dim=-1), V, "... queries keys, ... keys d_v -> ... queries d_v")
+    return out
 
 
 class MultiHeadSelfAttention(nn.Module):
@@ -134,6 +145,8 @@ class MultiHeadSelfAttention(nn.Module):
         num_heads: int,
         max_seq_len: int | None = None,
         theta: float | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
     ):
         super().__init__()
         self.d_model = d_model
@@ -141,15 +154,19 @@ class MultiHeadSelfAttention(nn.Module):
         self.max_seq_len = max_seq_len
         self.theta = theta
 
-        self.q_proj = Linear(in_features=d_model, out_features=d_model)
-        self.k_proj = Linear(in_features=d_model, out_features=d_model)
-        self.v_proj = Linear(in_features=d_model, out_features=d_model)
-        self.output_proj = Linear(in_features=d_model, out_features=d_model)
+        self.q_proj = Linear(in_features=d_model, out_features=d_model, device=device, dtype=dtype)
+        self.k_proj = Linear(in_features=d_model, out_features=d_model, device=device, dtype=dtype)
+        self.v_proj = Linear(in_features=d_model, out_features=d_model, device=device, dtype=dtype)
+        self.output_proj = Linear(in_features=d_model, out_features=d_model, device=device, dtype=dtype)
 
         self.rope = None
         if self.theta is not None and self.max_seq_len is not None:
             self.rope = RotaryPositionalEmbedding(
-                theta=self.theta, d_k=self.d_model // self.num_heads, max_seq_len=self.max_seq_len
+                theta=self.theta,
+                d_k=self.d_model // self.num_heads,
+                max_seq_len=self.max_seq_len,
+                device=device,
+                dtype=dtype,
             )
 
     def forward(
@@ -185,12 +202,23 @@ class MultiHeadSelfAttention(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, d_model: int, num_heads: int, d_ff: int, max_seq_len: int, theta: float):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        max_seq_len: int,
+        theta: float,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
         super().__init__()
-        self.attn = MultiHeadSelfAttention(d_model=d_model, num_heads=num_heads, max_seq_len=max_seq_len, theta=theta)
-        self.ln1 = RMSNorm(d_model=d_model)
-        self.ffn = SwiGLU(d_model=d_model, d_ff=d_ff)
-        self.ln2 = RMSNorm(d_model=d_model)
+        self.attn = MultiHeadSelfAttention(
+            d_model=d_model, num_heads=num_heads, max_seq_len=max_seq_len, theta=theta, device=device, dtype=dtype
+        )
+        self.ln1 = RMSNorm(d_model=d_model, device=device, dtype=dtype)
+        self.ffn = SwiGLU(d_model=d_model, d_ff=d_ff, device=device, dtype=dtype)
+        self.ln2 = RMSNorm(d_model=d_model, device=device, dtype=dtype)
 
     def forward(self, x: Float[Tensor, " batch sequence_length d_model"]):
         seq_len = x.shape[-2]
@@ -212,19 +240,27 @@ class TransformerLM(nn.Module):
         num_heads: int,
         d_ff: int,
         rope_theta: float,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
     ):
         super().__init__()
-        self.token_embeddings = Embedding(num_embeddings=vocab_size, embedding_dim=d_model)
+        self.token_embeddings = Embedding(num_embeddings=vocab_size, embedding_dim=d_model, device=device, dtype=dtype)
         self.layers = nn.ModuleList(
             [
                 Transformer(
-                    d_model=d_model, num_heads=num_heads, d_ff=d_ff, max_seq_len=context_length, theta=rope_theta
+                    d_model=d_model,
+                    num_heads=num_heads,
+                    d_ff=d_ff,
+                    max_seq_len=context_length,
+                    theta=rope_theta,
+                    device=device,
+                    dtype=dtype,
                 )
                 for _ in range(num_layers)
             ]
         )
-        self.ln_final = RMSNorm(d_model=d_model)
-        self.lm_head = Linear(in_features=d_model, out_features=vocab_size)
+        self.ln_final = RMSNorm(d_model=d_model, device=device, dtype=dtype)
+        self.lm_head = Linear(in_features=d_model, out_features=vocab_size, device=device, dtype=dtype)
 
     def forward(
         self, token_ids: Int[Tensor, " batch_size sequence_length"]
