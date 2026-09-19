@@ -36,7 +36,7 @@ class Embedding(nn.Module):
     ):
         super().__init__()
         self.d_model = embedding_dim
-        self.weights = nn.Parameter(
+        self.weight = nn.Parameter(
             nn.init.trunc_normal_(
                 torch.zeros([num_embeddings, embedding_dim], dtype=dtype, device=device),
                 mean=0.0,
@@ -46,8 +46,8 @@ class Embedding(nn.Module):
             )
         )
 
-    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
-        return self.weights[token_ids,]
+    def forward(self, token_ids: Int[Tensor, " ..."]) -> Float[Tensor, " ... d_model"]:
+        return self.weight[token_ids,]
 
 
 class RMSNorm(nn.Module):
@@ -59,7 +59,7 @@ class RMSNorm(nn.Module):
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(d_model, device=device, dtype=dtype))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Float[Tensor, " ... d_model"]) -> Float[Tensor, " ... d_model"]:
         x_dtype = x.dtype
         x = x.to(torch.float32)
 
@@ -200,3 +200,37 @@ class Transformer(nn.Module):
         y2 = y1 + self.ffn(self.ln2(y1))
 
         return y2
+
+
+class TransformerLM(nn.Module):
+    def __init__(
+        self,
+        vocab_size: int,
+        context_length: int,
+        d_model: int,
+        num_layers: int,
+        num_heads: int,
+        d_ff: int,
+        rope_theta: float,
+    ):
+        super().__init__()
+        self.token_embeddings = Embedding(num_embeddings=vocab_size, embedding_dim=d_model)
+        self.layers = nn.ModuleList(
+            [
+                Transformer(
+                    d_model=d_model, num_heads=num_heads, d_ff=d_ff, max_seq_len=context_length, theta=rope_theta
+                )
+                for _ in range(num_layers)
+            ]
+        )
+        self.ln_final = RMSNorm(d_model=d_model)
+        self.lm_head = Linear(in_features=d_model, out_features=vocab_size)
+
+    def forward(
+        self, token_ids: Int[Tensor, " batch_size sequence_length"]
+    ) -> Float[Tensor, "batch_size sequence_length vocab_size"]:
+        x = self.token_embeddings(token_ids)
+        for t_layer in self.layers:
+            x = t_layer(x)
+
+        return self.lm_head(self.ln_final(x))
