@@ -33,9 +33,9 @@ def run_linear(
     """
 
     l = transformer.Linear(d_in, d_out, None, None)
-    l.load_state_dict({"weights": weights}, strict=True)
+    l.load_state_dict({"weight": weights}, strict=True)
 
-    return l.forward(in_features)
+    return l(in_features)
 
 
 def run_embedding(
@@ -60,7 +60,7 @@ def run_embedding(
     e = transformer.Embedding(vocab_size, d_model)
     e.load_state_dict({"weights": weights}, strict=True)
 
-    return e.forward(token_ids)
+    return e(token_ids)
 
 
 def run_swiglu(
@@ -93,8 +93,8 @@ def run_swiglu(
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
     s = transformer.SwiGLU(d_model=d_model, d_ff=d_ff)
-    s.load_state_dict({"weights_1": w1_weight, "weights_2": w2_weight, "weights_3": w3_weight})
-    return s.forward(x=in_features)
+    s.load_state_dict({"w1.weight": w1_weight, "w2.weight": w2_weight, "w3.weight": w3_weight})
+    return s(x=in_features)
 
 
 def run_scaled_dot_product_attention(
@@ -152,13 +152,18 @@ def run_multihead_self_attention(
     mha = transformer.MultiHeadSelfAttention(
         d_model=d_model,
         num_heads=num_heads,
-        q_proj_weight=q_proj_weight,
-        k_proj_weight=k_proj_weight,
-        v_proj_weight=v_proj_weight,
-        o_proj_weight=o_proj_weight,
     )
 
-    return mha.forward(x=in_features)
+    mha.load_state_dict(
+        {
+            "q_proj.weight": q_proj_weight,
+            "k_proj.weight": k_proj_weight,
+            "v_proj.weight": v_proj_weight,
+            "o_proj.weight": o_proj_weight,
+        }
+    )
+
+    return mha(x=in_features)
 
 
 def run_multihead_self_attention_with_rope(
@@ -203,12 +208,17 @@ def run_multihead_self_attention_with_rope(
         num_heads=num_heads,
         max_seq_len=max_seq_len,
         theta=theta,
-        q_proj_weight=q_proj_weight,
-        k_proj_weight=k_proj_weight,
-        v_proj_weight=v_proj_weight,
-        o_proj_weight=o_proj_weight,
     )
-    return mha.forward(x=in_features, token_positions=token_positions)
+
+    mha.load_state_dict(
+        {
+            "q_proj.weight": q_proj_weight,
+            "k_proj.weight": k_proj_weight,
+            "v_proj.weight": v_proj_weight,
+            "o_proj.weight": o_proj_weight,
+        }
+    )
+    return mha(x=in_features, token_positions=token_positions)
 
 
 def run_rope(
@@ -231,7 +241,7 @@ def run_rope(
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
     r = transformer.RotaryPositionalEmbedding(theta=theta, d_k=d_k, max_seq_len=max_seq_len)
-    return r.forward(x=in_query_or_key, token_positions=token_positions)
+    return r(x=in_query_or_key, token_positions=token_positions)
 
 
 def run_transformer_block(
@@ -304,7 +314,10 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    t = transformer.Transformer(d_model=d_model, num_heads=num_heads, d_ff=d_ff, max_seq_len=max_seq_len, theta=theta)
+    t.load_state_dict(weights, strict=True)
+
+    return t(in_features)
 
 
 def run_transformer_lm(
@@ -411,7 +424,7 @@ def run_rmsnorm(
     """
     r = transformer.RMSNorm(d_model=d_model, eps=eps)
     r.load_state_dict({"weights": weights})
-    return r.forward(in_features)
+    return r(in_features)
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:

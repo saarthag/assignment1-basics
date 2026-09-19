@@ -12,7 +12,7 @@ class Linear(nn.Module):
     ):
         super().__init__()
         std_ = math.sqrt(2 / (in_features + out_features))
-        self.weights = nn.Parameter(
+        self.weight = nn.Parameter(
             nn.init.trunc_normal_(
                 torch.zeros([out_features, in_features], dtype=dtype, device=device),
                 mean=0.0,
@@ -23,7 +23,7 @@ class Linear(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return einsum(x, self.weights, "... d_in, d_out d_in -> ... d_out")
+        return einsum(x, self.weight, "... d_in, d_out d_in -> ... d_out")
 
 
 class Embedding(nn.Module):
@@ -57,7 +57,7 @@ class RMSNorm(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.eps = eps
-        self.weights = nn.Parameter(torch.ones(d_model, device=device, dtype=dtype))
+        self.weight = nn.Parameter(torch.ones(d_model, device=device, dtype=dtype))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_dtype = x.dtype
@@ -65,7 +65,7 @@ class RMSNorm(nn.Module):
 
         var_ = x.pow(2).mean(dim=-1, keepdim=True) + self.eps
         x_norm = x * torch.rsqrt(var_)
-        rmsnorm = x_norm * self.weights
+        rmsnorm = x_norm * self.weight
 
         return rmsnorm.to(x_dtype)
 
@@ -76,44 +76,16 @@ class SwiGLU(nn.Module):
         self.d_model = d_model
         self.d_ff = d_ff
 
-        std_ = math.sqrt(2 / (d_ff + d_model))
-
-        self.weights_1: Float[Tensor, " d_ff d_model"] = nn.Parameter(
-            nn.init.trunc_normal_(
-                torch.zeros([d_ff, d_model], dtype=dtype, device=device),
-                mean=0.0,
-                std=std_,
-                a=-3 * std_,
-                b=3 * std_,
-            )
-        )
-
-        self.weights_2: Float[Tensor, " d_model d_ff"] = nn.Parameter(
-            nn.init.trunc_normal_(
-                torch.zeros([d_model, d_ff], dtype=dtype, device=device),
-                mean=0.0,
-                std=std_,
-                a=-3 * std_,
-                b=3 * std_,
-            )
-        )
-
-        self.weights_3: Float[Tensor, " d_ff d_model"] = nn.Parameter(
-            nn.init.trunc_normal_(
-                torch.zeros([d_ff, d_model], dtype=dtype, device=device),
-                mean=0.0,
-                std=std_,
-                a=-3 * std_,
-                b=3 * std_,
-            )
-        )
+        self.w1 = Linear(in_features=d_model, out_features=d_ff, device=device, dtype=dtype)
+        self.w2 = Linear(in_features=d_ff, out_features=d_model, device=device, dtype=dtype)
+        self.w3 = Linear(in_features=d_model, out_features=d_ff, device=device, dtype=dtype)
 
     def forward(self, x: Float[Tensor, " ... d_model"]) -> Float[Tensor, " ... d_model"]:
-        w1_x = einsum(x, self.weights_1, "... d_model, d_ff d_model -> ... d_ff")
+        w1_x = self.w1(x)
         silu_w1_x = w1_x * torch.sigmoid(w1_x)
-        w3_x = einsum(x, self.weights_3, "... d_model, d_ff d_model -> ... d_ff")
+        w3_x = self.w3(x)
 
-        return einsum(silu_w1_x * w3_x, self.weights_2, "... d_ff, d_model d_ff -> ... d_model")
+        return self.w2(silu_w1_x * w3_x)
 
 
 class RotaryPositionalEmbedding(nn.Module):
@@ -160,10 +132,6 @@ class MultiHeadSelfAttention(nn.Module):
         self,
         d_model: int,
         num_heads: int,
-        q_proj_weight: Float[Tensor, " d_model d_model"],
-        k_proj_weight: Float[Tensor, " d_model d_model"],
-        v_proj_weight: Float[Tensor, " d_model d_model"],
-        o_proj_weight: Float[Tensor, " d_model d_model"],
         max_seq_len: int | None = None,
         theta: float | None = None,
     ):
@@ -172,10 +140,12 @@ class MultiHeadSelfAttention(nn.Module):
         self.num_heads = num_heads
         self.max_seq_len = max_seq_len
         self.theta = theta
-        self.query_weight = nn.Parameter(q_proj_weight)
-        self.key_weight = nn.Parameter(k_proj_weight)
-        self.value_weight = nn.Parameter(v_proj_weight)
-        self.o_weight = nn.Parameter(o_proj_weight)
+
+        self.q_proj = Linear(in_features=d_model, out_features=d_model)
+        self.k_proj = Linear(in_features=d_model, out_features=d_model)
+        self.v_proj = Linear(in_features=d_model, out_features=d_model)
+        self.output_proj = Linear(in_features=d_model, out_features=d_model)
+
         self.rope = None
         if self.theta is not None and self.max_seq_len is not None:
             self.rope = RotaryPositionalEmbedding(
@@ -189,13 +159,9 @@ class MultiHeadSelfAttention(nn.Module):
     ) -> Float[Tensor, " ... sequence_length d_model"]:
         # project x into query/key/value subspaces
         # here d_out = h.d_k = h.d_model/h = d_model
-        x_query = einsum(
-            x, self.query_weight, "... sequence_length d_model, d_out d_model -> ... sequence_length d_out"
-        )
-        x_key = einsum(x, self.key_weight, "... sequence_length d_model, d_out d_model -> ... sequence_length d_out")
-        x_value = einsum(
-            x, self.value_weight, "... sequence_length d_model, d_out d_model -> ... sequence_length d_out"
-        )
+        x_query = self.q_proj(x)
+        x_key = self.k_proj(x)
+        x_value = self.v_proj(x)
 
         # split into attention heads
         x_query_heads = rearrange(x_query, "... sequence_length (h d_k) -> ... h sequence_length d_k", h=self.num_heads)
@@ -204,8 +170,8 @@ class MultiHeadSelfAttention(nn.Module):
 
         if self.rope is not None:
             assert token_positions is not None, "token_positions must be provided for RoPE"
-            x_query_heads = self.rope.forward(x_query_heads, token_positions=token_positions)
-            x_key_heads = self.rope.forward(x_key_heads, token_positions=token_positions)
+            x_query_heads = self.rope(x_query_heads, token_positions)
+            x_key_heads = self.rope(x_key_heads, token_positions)
 
         seq_len = x.shape[-2]
         # mask will automatically broadcast over other dims
@@ -215,4 +181,22 @@ class MultiHeadSelfAttention(nn.Module):
             "... h sequence_length d_v -> ... sequence_length (h d_v)",
         )
 
-        return einsum(sdpa, self.o_weight, "... sequence_length d_model, d_out d_model -> ... sequence_length d_out")
+        return self.output_proj(sdpa)
+
+
+class Transformer(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, max_seq_len: int, theta: float):
+        super().__init__()
+        self.attn = MultiHeadSelfAttention(d_model=d_model, num_heads=num_heads, max_seq_len=max_seq_len, theta=theta)
+        self.ln1 = RMSNorm(d_model=d_model)
+        self.ffn = SwiGLU(d_model=d_model, d_ff=d_ff)
+        self.ln2 = RMSNorm(d_model=d_model)
+
+    def forward(self, x: Float[Tensor, " batch sequence_length d_model"]):
+        seq_len = x.shape[-2]
+        token_positions = torch.arange(seq_len, device=x.device)
+
+        y1 = x + self.attn(self.ln1(x), token_positions)
+        y2 = y1 + self.ffn(self.ln2(y1))
+
+        return y2
