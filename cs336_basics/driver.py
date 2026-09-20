@@ -1,5 +1,8 @@
 #! /usr/bin/env python
+import sys
+
 import humanize
+import torch
 from quantiphy import Quantity
 from rich.console import Console
 from rich.table import Table

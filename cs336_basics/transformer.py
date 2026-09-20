@@ -1,4 +1,5 @@
 import math
+from collections.abc import Callable
 
 import torch
 from einops import einsum, rearrange
@@ -270,3 +271,52 @@ class TransformerLM(nn.Module):
             x = t_layer(x)
 
         return self.lm_head(self.ln_final(x))
+
+
+class AdamW(torch.optim.Optimizer):
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-2):
+        if betas[0] < 0:
+            raise ValueError(f"Invalid beta_1: {betas[0]}")
+        if betas[1] < 0:
+            raise ValueError(f"Invalid beta_2: {betas[1]}")
+
+        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay}
+        super().__init__(params, defaults)
+
+    def step(self, closure: Callable | None = None):
+        loss = None if closure is None else closure()
+
+        for group in self.param_groups:
+            # get hyperparameters for current group
+            lr: float = group["lr"]
+            betas: tuple[float, float] = group["betas"]
+            eps: float = group["eps"]
+            weight_decay: float = group["weight_decay"]
+
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+
+                state = self.state[p]
+                t = state.get("t", 1)
+                # first moment
+                m = state.get("m", 0)
+                # second moment
+                v = state.get("v", 0)
+
+                grad = p.grad
+                lr_adjusted = lr * math.sqrt(1 - betas[1] ** t) / (1 - betas[0] ** t)
+                # update moment estimates
+                m = betas[0] * m + (1 - betas[0]) * grad
+                v = betas[1] * v + (1 - betas[1]) * grad**2
+
+                with torch.no_grad():
+                    p -= lr * weight_decay * p
+                    p -= lr_adjusted * m / (torch.sqrt(v) + eps)
+
+                # flush current state
+                state["t"] = t + 1
+                state["m"] = m
+                state["v"] = v
+
+        return loss
