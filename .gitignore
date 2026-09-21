@@ -163,3 +163,4 @@ cython_debug/
 *.zip
 *.pickle
 .DS_Store
+cs336_basics/peak_memory.html

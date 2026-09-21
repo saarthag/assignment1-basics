@@ -2,12 +2,16 @@
 import sys
 
 import humanize
+import plotly.graph_objects as go
 import torch
 from quantiphy import Quantity
 from rich.console import Console
 from rich.table import Table
 
 from cs336_basics import transformer
+
+DTYPE = "float32"
+DTYPE_BYTES = 4
 
 
 def flop_counter(
@@ -77,6 +81,11 @@ def d_ff_from_d_model(d_model: int) -> int:
     return -(-8 * d_model // (3 * 64)) * 64
 
 
+def peak_memory_bytes(num_params: int, num_activations: int) -> int:
+    """Peak training memory: params + grads + activations + optimizer state (2 * params)."""
+    return DTYPE_BYTES * (4 * num_params + num_activations)
+
+
 def build_table(
     name: str,
     config: dict[str, int],
@@ -124,14 +133,32 @@ def build_table(
         style="bold",
     )
 
-    # Peak training memory in float32: params + grads + activations + optimizer state (2 * params).
-    dtype = "float32"
-    float32_bytes = 4
-    peak_bytes = float32_bytes * (4 * params["total"] + activations["total"])
+    # Peak training memory: params + grads + activations + optimizer state (2 * params).
+    peak_bytes = peak_memory_bytes(params["total"], activations["total"])
     table.caption = (
-        f"peak memory ({dtype}, params + grads + activations + optimizer state): {humanize.naturalsize(peak_bytes)}"
+        f"peak memory ({DTYPE}, params + grads + activations + optimizer state): {humanize.naturalsize(peak_bytes)}"
     )
     return table
+
+
+def plot_peak_memory(models: dict[str, dict[str, int]], batch_sizes: list[int]) -> go.Figure:
+    """Plot peak training memory as a function of batch size, one line per model."""
+    fig = go.Figure()
+    for name, config in models.items():
+        num_params = param_counter(**config)["total"]
+        peak_gb = [
+            peak_memory_bytes(num_params, activation_counter(batch_size=b, **config)["total"]) / 1e9
+            for b in batch_sizes
+        ]
+        fig.add_trace(go.Scatter(x=batch_sizes, y=peak_gb, mode="lines+markers", name=name))
+
+    fig.update_layout(
+        title=f"Peak training memory ({DTYPE}) vs. batch size",
+        xaxis_title="batch size",
+        yaxis_title="peak memory (GB)",
+        legend_title="model",
+    )
+    return fig
 
 
 if __name__ == "__main__":
@@ -193,3 +220,9 @@ if __name__ == "__main__":
             )
         )
         console.print()
+
+    batch_sizes = list(range(1, 65))
+    fig = plot_peak_memory(models, batch_sizes)
+    output_path = "peak_memory.html"
+    fig.write_html(output_path)
+    console.print(f"wrote peak memory plot to [bold]{output_path}[/bold]")
