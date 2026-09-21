@@ -15,11 +15,18 @@ DTYPE_BYTES = 4
 
 
 def flop_counter(
-    vocab_size: int, context_length: int, num_layers: int, d_model: int, num_heads: int, d_ff: int, **kwargs
+    vocab_size: int,
+    context_length: int,
+    num_layers: int,
+    d_model: int,
+    num_heads: int,
+    d_ff: int,
+    batch_size: int = 1,
+    **kwargs,
 ) -> dict[str, int]:
-    mha = 8 * context_length * (d_model**2) + 4 * (context_length**2) * d_model
-    ffn = 6 * context_length * d_model * d_ff
-    lm_head = 2 * context_length * d_model * vocab_size
+    mha = batch_size * (8 * context_length * (d_model**2) + 4 * (context_length**2) * d_model)
+    ffn = batch_size * 6 * context_length * d_model * d_ff
+    lm_head = batch_size * 2 * context_length * d_model * vocab_size
 
     tot_mha = mha * num_layers
     tot_ffn = ffn * num_layers
@@ -163,30 +170,30 @@ def plot_peak_memory(models: dict[str, dict[str, int]], batch_sizes: list[int]) 
 
 if __name__ == "__main__":
     models = {
-        "gpt2-small": {
-            "vocab_size": 50257,
-            "context_length": 1024,
-            "num_layers": 12,
-            "d_model": 768,
-            "num_heads": 12,
-            "d_ff": d_ff_from_d_model(768),
-        },
-        "gpt2-medium": {
-            "vocab_size": 50257,
-            "context_length": 1024,
-            "num_layers": 24,
-            "d_model": 1024,
-            "num_heads": 16,
-            "d_ff": d_ff_from_d_model(1024),
-        },
-        "gpt2-large": {
-            "vocab_size": 50257,
-            "context_length": 1024,
-            "num_layers": 36,
-            "d_model": 1280,
-            "num_heads": 20,
-            "d_ff": d_ff_from_d_model(1280),
-        },
+        # "gpt2-small": {
+        #     "vocab_size": 50257,
+        #     "context_length": 1024,
+        #     "num_layers": 12,
+        #     "d_model": 768,
+        #     "num_heads": 12,
+        #     "d_ff": d_ff_from_d_model(768),
+        # },
+        # "gpt2-medium": {
+        #     "vocab_size": 50257,
+        #     "context_length": 1024,
+        #     "num_layers": 24,
+        #     "d_model": 1024,
+        #     "num_heads": 16,
+        #     "d_ff": d_ff_from_d_model(1024),
+        # },
+        # "gpt2-large": {
+        #     "vocab_size": 50257,
+        #     "context_length": 1024,
+        #     "num_layers": 36,
+        #     "d_model": 1280,
+        #     "num_heads": 20,
+        #     "d_ff": d_ff_from_d_model(1280),
+        # },
         "gpt2-xl": {
             "vocab_size": 50257,
             "context_length": 1024,
@@ -206,7 +213,7 @@ if __name__ == "__main__":
     }
 
     console = Console()
-    batch_size = 4
+    batch_size = 1024
 
     for name, config in models.items():
         console.print(
@@ -215,7 +222,7 @@ if __name__ == "__main__":
                 config,
                 batch_size,
                 param_counter(**config),
-                flop_counter(**config),
+                flop_counter(batch_size=batch_size, **config),
                 activation_counter(batch_size=batch_size, **config),
             )
         )
