@@ -65,7 +65,7 @@ class RMSNorm(nn.Module):
         x_dtype = x.dtype
         x = x.to(torch.float32)
 
-        var_ = x.pow(2).mean(dim=-1, keepdim=True) + self.eps
+        var_ = (x**2).mean(dim=-1, keepdim=True) + self.eps
         x_norm = x * torch.rsqrt(var_)
         rmsnorm = x_norm * self.weight
 
@@ -85,9 +85,8 @@ class SwiGLU(nn.Module):
     def forward(self, x: Float[Tensor, " ... d_model"]) -> Float[Tensor, " ... d_model"]:
         w1_x = self.w1(x)
         silu_w1_x = w1_x * torch.sigmoid(w1_x)
-        w3_x = self.w3(x)
 
-        return self.w2(silu_w1_x * w3_x)
+        return self.w2(silu_w1_x * self.w3(x))
 
 
 class RotaryPositionalEmbedding(nn.Module):

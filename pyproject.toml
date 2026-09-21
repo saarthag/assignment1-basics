@@ -20,6 +20,7 @@ dependencies = [
     "ty>=0.0.26",
     "ruff>=0.15.8",
     "rich>=15.0.0",
+    "plotly>=7.1.0",
 ]
 
 [build-system]
@@ -48,6 +49,9 @@ extend-exclude = ["tests/adapters.py"]
 "__init__.py" = ["E402", "F401", "F403", "E501"]
 
 [dependency-groups]
+agent = [
+    "pypdf>=6.19.0",
+]
 dev = [
     "humanize>=4.16.0",
     "jupyter>=1.1.1",
