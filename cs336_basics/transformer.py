@@ -1,5 +1,5 @@
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 import torch
 from einops import einsum, rearrange
@@ -333,3 +333,27 @@ def cosine_lr_schedule(
             ) * (max_learning_rate - min_learning_rate)
 
     return min_learning_rate
+
+
+def clip_grad(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
+    # materialize the iterable
+    parameter_list = list(parameters)
+    tot_l2_norm = 0.0
+
+    # total gradient computation
+    for p in parameter_list:
+        grad = p.grad
+        if grad is not None:
+            tot_l2_norm += (grad * grad).sum()
+
+    tot_l2_norm = math.sqrt(tot_l2_norm)
+
+    # gradient adjustment
+    if tot_l2_norm > max_l2_norm:
+        adj = max_l2_norm / (tot_l2_norm + 1e-6)
+
+        for p in parameter_list:
+            grad = p.grad
+            if grad is not None:
+                with torch.no_grad():
+                    grad *= adj
