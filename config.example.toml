@@ -1,0 +1,10 @@
+# Example BPE tokenizer training config.
+# Copy to `config.toml` and run: python -m cs336_basics.train
+#
+# Relative paths are resolved against this file's directory.
+# The output directory defaults to `training/` next to the config file.
+
+corpus = "data/TinyStoriesV2-GPT4-train.txt"
+vocab_size = 10000
+special_tokens = ["<|endoftext|>"]
+output_dir = "training"

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from cs336_basics.tokenizer.bpe import Tokenizer
+from cs336_basics.tokenizer.bpe import BPETokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ def run_tokenizer_encode(
     with open(vocab_path, "rb") as f_vocab, open(merge_pairs_path, "rb") as f_mp:
         vocab = pickle.load(f_vocab)
         merge_pairs = pickle.load(f_mp)
-    tokenizer = Tokenizer(vocab, merge_pairs, special_tokens=special_tokens)
+    tokenizer = BPETokenizer(vocab, merge_pairs, special_tokens=special_tokens)
     logger.info("tokenizer ready: vocab_size=%d, special_tokens=%s", len(vocab), special_tokens)
 
     storage_dtype = np.dtype(dtype)

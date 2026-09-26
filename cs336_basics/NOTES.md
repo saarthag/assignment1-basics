@@ -1,0 +1,5 @@
+- train a BPE
+    - corpus may not be the same as the model training corpus
+    - should be retained and tracked separately
+    - may be shared across model experiments
+- train the model

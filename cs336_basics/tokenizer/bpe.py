@@ -1,4 +1,5 @@
 import heapq
+import logging
 import os
 import pickle
 import tempfile
@@ -12,6 +13,8 @@ from typing import BinaryIO
 
 import regex as re2
 from rich.pretty import pprint
+
+logger = logging.getLogger(__name__)
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 re2_PAT = re2.compile(PAT)
@@ -99,17 +102,47 @@ def pre_tokenize(input_path: os.PathLike, special_tokens: list[str] | None = Non
 
 
 def train_bpe_fast(
-    input_path: str | os.PathLike, vocab_size: int, special_tokens: list[str]
+    input_path: str | os.PathLike,
+    vocab_size: int,
+    special_tokens: list[str],
+    stats: dict | None = None,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+    """Train a byte-level BPE tokenizer.
+
+    Args:
+        input_path: text corpus to train on.
+        vocab_size: target vocabulary size (including the 256 byte tokens and
+            the special tokens).
+        special_tokens: tokens that are added verbatim and never merged.
+        stats: optional dict that is populated with run analytics
+            (``pre_tokenize_time_s``, ``merge_time_s``, ``merge_iterations``,
+            ``merge_per_iter_s``, ``num_unique_pretokens``).
+
+    Returns:
+        (vocab, merges) where ``vocab`` maps token id -> bytes and ``merges``
+        is the ordered list of merged byte pairs.
+    """
     vocab = {i: i.to_bytes(1) for i in range(256)} | {
         256 + i: st.encode("utf-8") for i, st in enumerate(special_tokens)
     }
     vocab_size_cur = len(vocab)
     merge_pairs: list[tuple[int, int]] = []
 
+    logger.info(
+        "starting BPE training: input=%s, target_vocab_size=%d, special_tokens=%s",
+        input_path,
+        vocab_size,
+        special_tokens,
+    )
     start_time = time.perf_counter()
+    logger.debug("pre-tokenizing corpus")
     pre_tokens_tmp = Counter(pre_tokenize(Path(input_path), special_tokens=special_tokens))
-    print("pre_tokenize", time.perf_counter() - start_time)
+    pre_tokenize_time = time.perf_counter() - start_time
+    logger.info(
+        "pre-tokenization done: %d unique pre-tokens in %.3fs",
+        len(pre_tokens_tmp),
+        pre_tokenize_time,
+    )
 
     # pre-allocate since size is known
     pre_tokens = [None] * len(pre_tokens_tmp)
@@ -148,7 +181,12 @@ def train_bpe_fast(
     bp_heap = [(-v, BPWrapper(k)) for k, v in bp_cnt_index.items()]
     heapq.heapify(bp_heap)
 
+    merge_niters = vocab_size - 256 - len(special_tokens)
+    logger.info("starting merge phase: %d merges to perform", merge_niters)
+    progress_every = max(1, merge_niters // 100)
+
     start_time = time.perf_counter()
+    merges_done = 0
     while vocab_size_cur < vocab_size:
         top = heapq.heappop(bp_heap)
         while -top[0] != (v := bp_cnt_index[top[1].bp]):
@@ -162,6 +200,17 @@ def train_bpe_fast(
         vocab[vocab_size_cur] = vocab[best_bp[0]] + vocab[best_bp[1]]
         new_token = vocab_size_cur
         vocab_size_cur += 1
+        merges_done += 1
+
+        if merges_done % progress_every == 0 or merges_done == merge_niters:
+            logger.debug(
+                "merge %d/%d (%.1f%%): %r -> %r",
+                merges_done,
+                merge_niters,
+                100 * merges_done / merge_niters,
+                vocab[best_bp[0]],
+                vocab[best_bp[1]],
+            )
 
         heap_candidates = []
         positions = bp_pos_index[best_bp]
@@ -206,15 +255,30 @@ def train_bpe_fast(
 
     # profiling
     merge_tottime = time.perf_counter() - start_time
-    merge_niters = vocab_size - 256 - len(special_tokens)
-    print("merge_tottime", merge_tottime)
-    print("merge_niters", merge_niters)
-    print("merge_periter", merge_tottime / merge_niters)
+    merge_periter = merge_tottime / merge_niters if merge_niters else 0.0
+    logger.info(
+        "merge phase done: %d merges in %.3fs (%.3f s/merge)",
+        merge_niters,
+        merge_tottime,
+        merge_periter,
+    )
+    logger.info("BPE training complete: final vocab size = %d", len(vocab))
+
+    if stats is not None:
+        stats.update(
+            {
+                "pre_tokenize_time_s": pre_tokenize_time,
+                "merge_time_s": merge_tottime,
+                "merge_iterations": merge_niters,
+                "merge_per_iter_s": merge_periter,
+                "num_unique_pretokens": len(pre_tokens_tmp),
+            }
+        )
 
     return vocab, [(vocab[mp[0]], vocab[mp[1]]) for mp in merge_pairs]
 
 
-class Tokenizer:
+class BPETokenizer:
     def __init__(
         self, vocab: dict[int, bytes], merges: list[tuple[bytes, bytes]], special_tokens: list[str] | None = None
     ):
