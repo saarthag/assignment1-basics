@@ -83,8 +83,10 @@ class SwiGLU(nn.Module):
         self.w3 = Linear(in_features=d_model, out_features=d_ff, device=device, dtype=dtype)
 
     def forward(self, x: Float[Tensor, " ... d_model"]) -> Float[Tensor, " ... d_model"]:
-        w1_x = self.w1(x)
-        silu_w1_x = w1_x * torch.sigmoid(w1_x)
+        out_dtype = x.dtype
+        # SiLU is range-sensitive; evaluate the gate in fp32 and cast back.
+        w1_x = self.w1(x).float()
+        silu_w1_x = (w1_x * torch.sigmoid(w1_x)).to(out_dtype)
 
         return self.w2(silu_w1_x * self.w3(x))
 
@@ -100,28 +102,37 @@ class RotaryPositionalEmbedding(nn.Module):
     ):
         super().__init__()
         self.d_k = d_k
-        exp = torch.arange(d_k >> 1, device=device, dtype=dtype) * 2 / d_k
+        # Build the angle table in fp32 regardless of the model dtype: the angles
+        # span many decades and low precision here corrupts positions.
+        exp = torch.arange(d_k >> 1, device=device, dtype=torch.float32) * 2 / d_k
         angles = einsum(
-            torch.arange(max_seq_len, device=device, dtype=dtype), theta**-exp, "max_seq_len, dk2 -> max_seq_len dk2"
+            torch.arange(max_seq_len, device=device, dtype=torch.float32),
+            theta**-exp,
+            "max_seq_len, dk2 -> max_seq_len dk2",
         )
 
         self.register_buffer("sin_precomp", torch.sin(angles), persistent=False)
         self.register_buffer("cos_precomp", torch.cos(angles), persistent=False)
 
     def forward(self, x: Float[Tensor, " ... seq_len d_k"], token_positions: Int[Tensor, " ... seq_len"]) -> Tensor:
+        out_dtype = x.dtype
         sin_ord = self.get_buffer("sin_precomp")[token_positions]
         cos_ord = self.get_buffer("cos_precomp")[token_positions]
 
-        x_pair = rearrange(x, "... seq_len (dk2 p) -> ... seq_len dk2 p", dk2=(self.d_k >> 1), p=2)
+        # Rotate in fp32 so the multiply-add does not lose angle precision.
+        x_pair = rearrange(x.float(), "... seq_len (dk2 p) -> ... seq_len dk2 p", dk2=(self.d_k >> 1), p=2)
         x_pair_flip = x_pair[..., [1, 0]] * torch.tensor([-1, 1], device=x_pair.device)
         x_pair_roped = x_pair * cos_ord.unsqueeze(dim=-1) + x_pair_flip * sin_ord.unsqueeze(dim=-1)
 
-        return rearrange(x_pair_roped, "... dk2 p -> ... (dk2 p)")
+        return rearrange(x_pair_roped, "... dk2 p -> ... (dk2 p)").to(out_dtype)
 
 
 def my_softmax(x: Tensor, dim: int):
+    out_dtype = x.dtype
+    # Softmax in fp32: max/exp/reciprocal lose too much range in bf16/fp16.
+    x = x.float()
     exp_x = torch.exp(x - x.max(dim=dim, keepdim=True).values)
-    return exp_x * exp_x.sum(dim=dim, keepdim=True).reciprocal()
+    return (exp_x * exp_x.sum(dim=dim, keepdim=True).reciprocal()).to(out_dtype)
 
 
 def scaled_dot_product_attention(
@@ -298,20 +309,28 @@ class AdamW(torch.optim.Optimizer):
 
                 state = self.state[p]
                 t = state.get("t", 1)
-                # first moment
-                m = state.get("m", 0)
-                # second moment
-                v = state.get("v", 0)
+                # Adam moments must live in fp32: in bf16/fp16 the second moment
+                # rounds to zero and the update is destroyed. They are independent
+                # of the parameter's storage dtype.
+                m = state.get("m")
+                if m is None:
+                    m = torch.zeros_like(p, dtype=torch.float32)
+                v = state.get("v")
+                if v is None:
+                    v = torch.zeros_like(p, dtype=torch.float32)
 
-                grad = p.grad
+                grad = p.grad.float()
                 lr_adjusted = lr * math.sqrt(1 - betas[1] ** t) / (1 - betas[0] ** t)
                 # update moment estimates
                 m = betas[0] * m + (1 - betas[0]) * grad
                 v = betas[1] * v + (1 - betas[1]) * grad**2
 
                 with torch.no_grad():
-                    p -= lr * weight_decay * p
-                    p -= lr_adjusted * m / (torch.sqrt(v) + eps)
+                    # Apply the update in fp32, then write back in the param dtype.
+                    p_fp32 = p.float()
+                    p_fp32 -= lr * weight_decay * p_fp32
+                    p_fp32 -= lr_adjusted * m / (torch.sqrt(v) + eps)
+                    p.copy_(p_fp32)
 
                 # flush current state
                 state["t"] = t + 1
@@ -344,7 +363,7 @@ def clip_grad(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> f
     for p in parameter_list:
         grad = p.grad
         if grad is not None:
-            tot_l2_norm += (grad * grad).sum()
+            tot_l2_norm += (grad.float() ** 2).sum()
 
     tot_l2_norm = math.sqrt(tot_l2_norm)
 
