@@ -1,10 +1,59 @@
 import os
 import typing
+from collections.abc import Iterator
 
 import numpy as np
 import numpy.typing as npt
 import torch
+from einops import rearrange
 from torch import Tensor
+
+
+def stream_batch(
+    dataset: npt.NDArray,
+    dataset_tokens: int,
+    batch_size: int,
+    context_length: int,
+    device: str,
+    seed: int | None = None,
+) -> Iterator[tuple[Tensor, Tensor]]:
+    batch_tokens = batch_size * context_length
+    # each shard is ~10% of the dataset, aligned to whole batches
+    shard_size = max((dataset_tokens // 10 // batch_tokens) * batch_tokens, batch_tokens)
+    num_shards = -(-dataset_tokens // shard_size)
+
+    shard_idx = np.arange(num_shards)
+
+    epoch = 0
+    while True:
+        # A fixed `seed` makes every pass deterministic (one independent order per
+        # pass), so consuming batches reproduces the exact same stream and a
+        # skipped prefix lines up with a previous run.
+        rng = np.random.default_rng(None if seed is None else seed + epoch)
+        epoch += 1
+        rng.shuffle(shard_idx)
+
+        for i in shard_idx:
+            shard_start = i * shard_size
+            shard_end = min(shard_start + shard_size, dataset_tokens - 1)
+            for j in range(shard_start, shard_end, batch_tokens):
+                if j + batch_tokens >= dataset_tokens:
+                    continue
+                batch = dataset[j : j + batch_tokens + 1]
+                # torch.tensor copies (and casts) so the read-only memmap slice is
+                # never shared as a writable-tensor backing store.
+                yield (
+                    rearrange(
+                        torch.tensor(batch[:batch_tokens], dtype=torch.long, device=device),
+                        "(b t) -> b t",
+                        b=batch_size,
+                    ),
+                    rearrange(
+                        torch.tensor(batch[1:], dtype=torch.long, device=device),
+                        "(b t) -> b t",
+                        b=batch_size,
+                    ),
+                )
 
 
 def get_batch(dataset: npt.NDArray, batch_size: int, context_length: int, device: str) -> tuple[Tensor, Tensor]:

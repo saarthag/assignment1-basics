@@ -335,7 +335,7 @@ def cosine_lr_schedule(
     return min_learning_rate
 
 
-def clip_grad(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
+def clip_grad(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> float:
     # materialize the iterable
     parameter_list = list(parameters)
     tot_l2_norm = 0.0
@@ -357,3 +357,5 @@ def clip_grad(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> N
             if grad is not None:
                 with torch.no_grad():
                     grad *= adj
+
+    return float(tot_l2_norm)

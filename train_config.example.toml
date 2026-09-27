@@ -1,0 +1,51 @@
+# Example Transformer LM training config.
+# Copy to `train_config.toml` and run:
+#     python -m cs336_basics.train -c train_config.toml
+#
+# Relative paths are resolved against this file's directory. `tokenizer` points
+# to a tokenizer experiment directory laid out like experiments/tokenizer-v1
+# (i.e. it contains training/vocab.pkl and training/merges.pkl). The encoded
+# dataset is written next to the dataset as <dataset hash>__<tokenizer id>.bin
+# with a matching .json sidecar, and re-used on subsequent runs.
+
+# --- data / tokenizer ------------------------------------------------------- #
+dataset = "data/tinystories/tinystories_10.txt"
+# valid_dataset = "data/TinyStoriesV2-GPT4-valid.txt"
+tokenizer = "experiments/tokenizer-v1"
+output_dir = "training"
+
+# --- model ------------------------------------------------------------------ #
+# vocab_size is resolved from the tokenizer's training/meta.json.
+d_model = 256
+num_layers = 4
+context_length = 256
+theta = 10000.0
+num_heads = 8
+# d_ff = 704              # optional; defaults to 8/3 * d_model rounded to 64
+
+# --- optimization ----------------------------------------------------------- #
+batch_size = 32
+num_epochs = 1
+max_lr = 3e-4
+min_lr = 3e-5
+warmup_fraction = 0.1
+cosine_fraction = 1.0
+weight_decay = 0.01
+beta1 = 0.9
+beta2 = 0.999
+eps = 1e-8
+grad_clip = 1.0
+seed = 0
+device = "auto"
+dtype = "float32"
+
+# --- logging / wandb -------------------------------------------------------- #
+log_every = 1
+eval_every = 100
+eval_batches = 20
+checkpoint_every = 500
+use_wandb = true
+wandb_project = "cs336-assignment1"
+# wandb_entity = ""
+# run_name = ""
+# hardware_flops = 1e13    # optional override for the dry-run time estimate
