@@ -9,7 +9,7 @@ CONFIG     ?= train_config.toml
 ENV_FILE   ?= .env
 REV        ?= HEAD
 SESSION    ?= train
-DETACH     ?= 1
+DETACH     ?= 0
 SSH_KEY    ?=
 
 export REMOTE PORT REMOTE_DIR CONFIG ENV_FILE REV SESSION DETACH SSH_KEY

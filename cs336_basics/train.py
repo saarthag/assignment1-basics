@@ -1071,7 +1071,13 @@ def main(argv: list[str] | None = None) -> int:
         handlers=[stream_handler, file_handler],
         force=True,
     )
-    logging.getLogger("cs336_basics").setLevel(logging.DEBUG)
+    # `logger` is `__main__` when this file is run as a script (e.g.
+    # `uv run cs336_basics/train.py`) but `cs336_basics.train` when run as a
+    # module. Enable both, plus the package logger so submodule logs surface.
+    # DEBUG is only enabled with `-v`; otherwise INFO is the floor.
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    logging.getLogger("cs336_basics").setLevel(log_level)
+    logger.setLevel(log_level)
 
     logger.info("run id: %s", config["run_id"])
     logger.info("config: %s", config["config_path"])
