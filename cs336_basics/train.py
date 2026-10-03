@@ -1041,11 +1041,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry_run is not None:
         logging.basicConfig(
-            level=logging.DEBUG if args.verbose else logging.INFO,
+            level=logging.WARNING,
             format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
             force=True,
         )
+        logger.setLevel(logging.DEBUG if args.verbose else logging.INFO)
         try:
             print_dry_run(config, tokens=args.dry_run or None)
         except (FileNotFoundError, KeyError, ValueError) as exc:
@@ -1062,12 +1063,15 @@ def main(argv: list[str] | None = None) -> int:
     file_handler.setLevel(logging.DEBUG)
 
     logging.basicConfig(
-        level=logging.DEBUG,
+        # Keep third-party libraries (boto3, s3transfer, ...) at WARNING; only the
+        # current module's level is set below, so `-v` affects just this module.
+        level=logging.WARNING,
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[stream_handler, file_handler],
         force=True,
     )
+    logging.getLogger("cs336_basics").setLevel(logging.DEBUG)
 
     logger.info("run id: %s", config["run_id"])
     logger.info("config: %s", config["config_path"])
