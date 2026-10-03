@@ -167,3 +167,6 @@ cs336_basics/peak_memory.html
 
 # experiments
 experiments/
+
+# remote inputs downloaded into the cwd
+tokenizer/

@@ -2,17 +2,24 @@
 # Copy to `train_config.toml` and run:
 #     python -m cs336_basics.train -c train_config.toml
 #
-# Relative paths are resolved against this file's directory. `tokenizer` points
-# to a tokenizer experiment directory laid out like experiments/tokenizer-v1
-# (i.e. it contains training/vocab.pkl and training/merges.pkl). The encoded
-# dataset is written next to the dataset as <dataset hash>__<tokenizer id>.bin
-# with a matching .json sidecar, and re-used on subsequent runs.
+# `dataset`, `valid_dataset` and `tokenizer` accept local paths or s3://bucket/key
+# URIs; remote inputs are downloaded into the current working directory, mirroring
+# their bucket key layout. `tokenizer`
+# points to a tokenizer experiment directory laid out like experiments/tokenizer-v1
+# (i.e. it contains training/vocab.pkl and training/merges.pkl). Credentials for
+# S3-compatible storage are read from the environment (see cs336_basics/storage.py).
 
 # --- data / tokenizer ------------------------------------------------------- #
 dataset = "data/tinystories/tinystories_10.txt"
 # valid_dataset = "data/TinyStoriesV2-GPT4-valid.txt"
+# dataset = "s3://my-bucket/data/tinystories_10.txt"
+# tokenizer = "s3://my-bucket/experiments/tokenizer-v1"
 tokenizer = "experiments/tokenizer-v1"
-output_dir = "training"
+
+# --- run / artifacts -------------------------------------------------------- #
+# run_id = "my-run"                  # default: generated (8-char base-36)
+# work_dir = "training"             # default: $TMPDIR/_work_<run_id>
+# upload_uri = "s3://my-bucket/runs"  # publish artifacts + checkpoints to <upload_uri>/<run_id>/
 
 # --- model ------------------------------------------------------------------ #
 # vocab_size is resolved from the tokenizer's training/meta.json.
@@ -47,5 +54,8 @@ checkpoint_every = 500
 use_wandb = true
 wandb_project = "cs336-assignment1"
 # wandb_entity = ""
-# run_name = ""
+# notes = """
+# Free-text markdown shown on the wandb run, e.g. design decisions.
+# """
+# tags = ["baseline", "tinystories"]
 # hardware_flops = 1e13    # optional override for the dry-run time estimate

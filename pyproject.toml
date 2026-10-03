@@ -21,6 +21,7 @@ dependencies = [
     "ruff>=0.15.8",
     "rich>=15.0.0",
     "plotly>=7.1.0",
+    "boto3>=1.43.108",
 ]
 
 [build-system]

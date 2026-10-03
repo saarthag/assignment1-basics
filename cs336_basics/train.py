@@ -8,11 +8,13 @@ The config file (``train_config.toml`` in the current directory by default)
 reads the tokenizer and data locations plus the model/optimization
 hyperparameters, e.g.::
 
-    # data / tokenizer
+    # data / tokenizer (local paths or s3://bucket/key URIs)
     dataset        = "data/tinystories/tinystories_10.txt"
     valid_dataset  = "data/TinyStoriesV2-GPT4-valid.txt"   # optional
     tokenizer      = "experiments/tokenizer-v1"            # experiment dir
-    output_dir     = "training"                            # artifact dir
+    # work_dir     = "training"          # artifact dir (default: $TMPDIR/_work_<run-id>)
+    # upload_uri   = "s3://bucket/runs"  # publish artifacts + checkpoints here
+    # run_id       = "my-run"            # default: generated
 
     # model
     # vocab_size is resolved from the tokenizer's training/meta.json.
@@ -48,11 +50,16 @@ hyperparameters, e.g.::
     use_wandb          = true
     wandb_project      = "cs336-assignment1"
     wandb_entity       = ""        # optional
-    run_name           = ""        # optional, defaults to output dir name
+    # notes            = "Free-text markdown shown on the wandb run."
+    # tags             = ["baseline", "tinystories"]
 
 Relative paths are resolved against the directory containing the config file.
-The output directory defaults to ``training/`` next to the config file and
-receives ``config.json``, ``meta.json``, ``logs.txt`` and ``checkpoints/``.
+Remote ``dataset``/``valid_dataset``/``tokenizer`` inputs are downloaded into
+the current working directory, mirroring their bucket key layout, so every
+script shares one copy.  Artifacts (``config.json``, ``meta.json``,
+``logs.txt`` and ``checkpoints/``) are written to ``work_dir``,
+which defaults to ``$TMPDIR/_work_<run_id>``.  When ``upload_uri`` is set they
+are also uploaded to ``<upload_uri>/<run_id>/``.
 
 The ``--dry-run`` flag estimates parameters, FLOPs, peak memory and expected
 wall-clock time for the configured model on the current hardware without
@@ -68,7 +75,10 @@ import logging
 import math
 import os
 import pickle
+import secrets
+import string
 import sys
+import tempfile
 import time
 import tomllib
 from itertools import islice
@@ -80,6 +90,7 @@ import torch
 import torch.nn.functional as F
 from quantiphy import Quantity
 
+from cs336_basics.storage import ensure_local, get_s3_client, split_s3
 from cs336_basics.tokenizer.bpe import BPETokenizer
 from cs336_basics.training_utils import get_batch, load_checkpoint, save_checkpoint, stream_batch
 from cs336_basics.transformer import AdamW, TransformerLM, clip_grad, cosine_lr_schedule
@@ -87,8 +98,12 @@ from cs336_basics.transformer import AdamW, TransformerLM, clip_grad, cosine_lr_
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = Path("train_config.toml")
-DEFAULT_OUTPUT_DIR = "training"
 DEFAULT_WANDB_PROJECT = "cs336n"
+RUN_ID_LENGTH = 8
+
+# Shared dataset/tokenizer downloads go into the current working directory,
+# mirroring the bucket key layout (e.g. s3://b/data/x -> ./data/x).
+INPUTS_DIR = Path.cwd()
 
 # Number of hex characters kept from the dataset's SHA-256 digest. 20 hex chars
 # = 80 bits, so the chance of a collision across even a billion distinct
@@ -99,10 +114,12 @@ HASH_CHARS = 20
 # --------------------------------------------------------------------------- #
 # Config handling
 # --------------------------------------------------------------------------- #
-def _resolve(base_dir: Path, path: str) -> Path:
-    """Resolve ``path`` against ``base_dir`` unless it is already absolute."""
-    resolved = Path(path)
-    return resolved if resolved.is_absolute() else (base_dir / resolved).resolve()
+def _upload_checkpoint(upload_uri: str, run_id: str, path: Path) -> None:
+    """Upload a checkpoint to the run's ``checkpoints/`` prefix."""
+    dest = f"{upload_uri.rstrip('/')}/{run_id}/checkpoints/{path.name}"
+    bucket, key = split_s3(dest)
+    get_s3_client().upload_file(str(path), bucket, key)
+    logger.info("uploaded checkpoint %s -> %s", path.name, dest)
 
 
 def load_config(config_path: Path) -> dict:
@@ -145,29 +162,51 @@ def load_config(config_path: Path) -> dict:
         raise ValueError("`num_heads` must be a positive integer")
 
     base_dir = config_path.parent
-    dataset = _resolve(base_dir, raw["dataset"])
-    if not dataset.is_file():
-        raise FileNotFoundError(f"dataset file not found: {dataset}")
 
-    valid_dataset = None
-    if "valid_dataset" in raw:
-        if not isinstance(raw["valid_dataset"], str):
-            raise TypeError("`valid_dataset` must be a string path")
-        valid_dataset = _resolve(base_dir, raw["valid_dataset"])
-        if not valid_dataset.is_file():
-            raise FileNotFoundError(f"valid dataset file not found: {valid_dataset}")
+    for key in ("dataset", "tokenizer"):
+        if not isinstance(raw[key], str):
+            raise TypeError(f"`{key}` must be a string path or s3:// URI")
+    if "valid_dataset" in raw and not isinstance(raw["valid_dataset"], str):
+        raise TypeError("`valid_dataset` must be a string path or s3:// URI")
 
-    tokenizer_path = _resolve(base_dir, raw["tokenizer"])
-    if not tokenizer_path.is_dir():
-        raise NotADirectoryError(f"tokenizer path is not a directory: {tokenizer_path}")
+    notes = raw.get("notes")
+    if notes is not None and not isinstance(notes, str):
+        raise TypeError("`notes` must be a string")
 
-    with (tokenizer_path / "training" / "meta.json").open(encoding="utf-8") as f:
-        vocab_size = json.load(f)["result"]["vocab_size"]
+    tags = raw.get("tags")
+    if tags is not None and (not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags)):
+        raise TypeError("`tags` must be a list of strings")
+
+    upload_uri = raw.get("upload_uri")
+    if upload_uri is not None:
+        if not isinstance(upload_uri, str):
+            raise TypeError("`upload_uri` must be a string")
+        if not upload_uri.startswith("s3://"):
+            raise ValueError("`upload_uri` must be an s3:// URI")
+
+    if "run_id" in raw:
+        run_id = raw["run_id"]
+        if not isinstance(run_id, str) or not run_id or len(run_id) > 64:
+            raise ValueError("`run_id` must be a non-empty string of at most 64 characters")
+        allowed = string.ascii_letters + string.digits + "._-"
+        if not all(char in allowed for char in run_id):
+            raise ValueError("`run_id` may only contain letters, digits, '.', '_' and '-'")
+    else:
+        alphabet = string.ascii_lowercase + string.digits
+        run_id = "".join(secrets.choice(alphabet) for _ in range(RUN_ID_LENGTH))
+
+    work_dir = raw.get("work_dir")
+    if work_dir:
+        work_dir = Path(work_dir).expanduser()
+        if not work_dir.is_absolute():
+            work_dir = (base_dir / work_dir).resolve()
+    else:
+        # Ephemeral work directory; artifacts are published to `upload_uri` when set.
+        work_dir = Path(tempfile.gettempdir()) / f"_work_{run_id}"
 
     d_model = raw["d_model"]
     # FFN hidden size defaults to 8/3 * d_model, rounded up to the nearest multiple of 64.
     d_ff = raw.get("d_ff", -(-8 * d_model // (3 * 64)) * 64)
-    output_dir = _resolve(base_dir, raw.get("output_dir", DEFAULT_OUTPUT_DIR))
 
     num_epochs = raw.get("num_epochs")
     num_steps = raw.get("num_steps")
@@ -185,11 +224,15 @@ def load_config(config_path: Path) -> dict:
 
     return {
         "config_path": str(config_path),
-        "dataset": dataset,
-        "valid_dataset": valid_dataset,
-        "tokenizer_path": tokenizer_path,
-        "output_dir": output_dir,
-        "vocab_size": vocab_size,
+        "base_dir": str(base_dir),
+        "dataset": raw["dataset"],
+        "valid_dataset": raw.get("valid_dataset"),
+        "tokenizer": raw["tokenizer"],
+        "work_dir": work_dir,
+        "run_id": run_id,
+        "notes": notes,
+        "tags": tags or [],
+        "upload_uri": upload_uri,
         "d_model": d_model,
         "d_ff": d_ff,
         "num_layers": raw["num_layers"],
@@ -219,7 +262,6 @@ def load_config(config_path: Path) -> dict:
         "use_wandb": raw.get("use_wandb", True),
         "wandb_project": raw.get("wandb_project", DEFAULT_WANDB_PROJECT),
         "wandb_entity": raw.get("wandb_entity"),
-        "run_name": raw.get("run_name"),
         "hardware_flops": raw.get("hardware_flops"),
     }
 
@@ -238,6 +280,18 @@ def _serializable(value):
 # --------------------------------------------------------------------------- #
 # Tokenizer + dataset encoding
 # --------------------------------------------------------------------------- #
+def read_vocab_size(tokenizer_path: Path) -> int:
+    """Read ``vocab_size`` from a tokenizer experiment directory's ``meta.json``."""
+    with (tokenizer_path / "training" / "meta.json").open(encoding="utf-8") as f:
+        return json.load(f)["result"]["vocab_size"]
+
+
+def resolve_vocab_size(config: dict) -> int:
+    """Resolve ``vocab_size``, downloading an s3-hosted tokenizer when needed."""
+    tokenizer_path = ensure_local(config["tokenizer"], INPUTS_DIR, Path(config["base_dir"]))
+    return read_vocab_size(tokenizer_path)
+
+
 def load_tokenizer(tokenizer_path: Path) -> tuple[BPETokenizer, str, dict]:
     """Instantiate a :class:`BPETokenizer` from an experiment directory.
 
@@ -369,28 +423,49 @@ def ensure_encoded(
 # --------------------------------------------------------------------------- #
 def train(config: dict) -> dict:
     """Run training described by a validated ``config`` and write artifacts."""
-    output_dir: Path = config["output_dir"]
-    ckpt_dir = output_dir / "checkpoints"
+    work_dir: Path = config["work_dir"]
+    ckpt_dir = work_dir / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    logs_path = output_dir / "logs.txt"
+    logs_path = work_dir / "logs.txt"
+    run_id = config["run_id"]
+    upload_uri = config["upload_uri"]
 
     device = pick_device(config["device"])
     torch_dtype = getattr(torch, config["dtype"])
     torch.manual_seed(config["seed"])
     np.random.seed(config["seed"])
 
+    logger.info("run id: %s", run_id)
     logger.info("device: %s, dtype: %s", device, config["dtype"])
-    logger.info("output directory: %s", output_dir)
+    logger.info("work directory: %s", work_dir)
     logger.debug("resolved config: %s", _serializable(config))
 
     # --- tokenizer + dataset ------------------------------------------------ #
-    tokenizer, tokenizer_id, tokenizer_meta = load_tokenizer(config["tokenizer_path"])
-    train_data, train_encoding_meta = ensure_encoded(tokenizer, tokenizer_id, tokenizer_meta, config["dataset"])
-    valid_data, valid_encoding_meta = (None, None)
+    base_dir = Path(config["base_dir"])
+    dataset_path = ensure_local(config["dataset"], INPUTS_DIR, base_dir)
+    if not dataset_path.is_file():
+        raise FileNotFoundError(f"dataset file not found: {dataset_path}")
+
+    valid_path = None
     if config["valid_dataset"] is not None:
-        valid_data, valid_encoding_meta = ensure_encoded(
-            tokenizer, tokenizer_id, tokenizer_meta, config["valid_dataset"]
-        )
+        valid_path = ensure_local(config["valid_dataset"], INPUTS_DIR, base_dir)
+        if not valid_path.is_file():
+            raise FileNotFoundError(f"valid dataset file not found: {valid_path}")
+
+    tokenizer_path = ensure_local(config["tokenizer"], INPUTS_DIR, base_dir)
+    if not tokenizer_path.is_dir():
+        raise NotADirectoryError(f"tokenizer path is not a directory: {tokenizer_path}")
+    vocab_size = read_vocab_size(tokenizer_path)
+
+    logger.info("dataset: %s", dataset_path)
+    logger.info("tokenizer: %s", tokenizer_path)
+    logger.info("vocab size: %d", vocab_size)
+
+    tokenizer, tokenizer_id, tokenizer_meta = load_tokenizer(tokenizer_path)
+    train_data, train_encoding_meta = ensure_encoded(tokenizer, tokenizer_id, tokenizer_meta, dataset_path)
+    valid_data, valid_encoding_meta = (None, None)
+    if valid_path is not None:
+        valid_data, valid_encoding_meta = ensure_encoded(tokenizer, tokenizer_id, tokenizer_meta, valid_path)
     logger.debug(
         "dataset ready: %d train tokens, %d valid tokens",
         len(train_data),
@@ -427,7 +502,7 @@ def train(config: dict) -> dict:
 
     # --- model / optimizer -------------------------------------------------- #
     model = TransformerLM(
-        vocab_size=config["vocab_size"],
+        vocab_size=vocab_size,
         context_length=config["context_length"],
         d_model=config["d_model"],
         num_layers=config["num_layers"],
@@ -462,15 +537,18 @@ def train(config: dict) -> dict:
     if config["use_wandb"]:
         import wandb
 
-        run_name = config["run_name"] or output_dir.name
         run = wandb.init(
             project=config["wandb_project"],
             entity=config["wandb_entity"] or None,
-            name=run_name,
-            dir=str(output_dir),
+            id=run_id,
+            resume="allow",
+            name=run_id,
+            notes=config.get("notes"),
+            tags=config.get("tags") or None,
+            dir=str(work_dir),
             config=_serializable(
                 {
-                    **{k: v for k, v in config.items() if k != "config_path"},
+                    **{k: v for k, v in config.items() if k not in ("config_path", "notes")},
                     "resolved_num_steps": num_steps,
                     "num_params": num_params,
                     "tokenizer_id": tokenizer_id,
@@ -566,20 +644,25 @@ def train(config: dict) -> dict:
         if config["checkpoint_every"] and (step + 1) % config["checkpoint_every"] == 0:
             ckpt_path = ckpt_dir / f"step_{step + 1}.pt"
             save_checkpoint(model, optimizer, step + 1, ckpt_path)
-            save_checkpoint(model, optimizer, step + 1, ckpt_dir / "latest.pt")
             logger.info("saved checkpoint %s", ckpt_path)
+            if upload_uri:
+                _upload_checkpoint(upload_uri, run_id, ckpt_path)
 
     total_time = time.perf_counter() - run_start
     final_ckpt = ckpt_dir / "final.pt"
     save_checkpoint(model, optimizer, num_steps, final_ckpt)
     logger.info("saved final checkpoint %s", final_ckpt)
+    if upload_uri:
+        _upload_checkpoint(upload_uri, run_id, final_ckpt)
 
     # --- artifacts ---------------------------------------------------------- #
-    config_path = output_dir / "config.json"
+    config_path = work_dir / "config.json"
     with config_path.open("w", encoding="utf-8") as f:
         json.dump(_serializable(config), f, ensure_ascii=False, indent=2)
 
     meta = {
+        "run_id": run_id,
+        "upload_uri": upload_uri,
         "config": _serializable(config),
         "tokenizer": tokenizer_meta,
         "dataset": {
@@ -599,12 +682,12 @@ def train(config: dict) -> dict:
         "artifacts": {
             "config": str(config_path),
             "logs": str(logs_path),
-            "report": str(output_dir / "meta.json"),
+            "report": str(work_dir / "meta.json"),
             "final_checkpoint": str(final_ckpt),
             "checkpoints_dir": str(ckpt_dir),
         },
     }
-    meta_path = output_dir / "meta.json"
+    meta_path = work_dir / "meta.json"
     with meta_path.open("w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
@@ -615,6 +698,21 @@ def train(config: dict) -> dict:
         total_time / max(1, num_steps - start_step),
     )
     logger.info("wrote report to %s", meta_path)
+
+    if upload_uri:
+        # Publish the run's non-checkpoint artifacts (config, meta, logs).
+        bucket, key = split_s3(upload_uri)
+        prefix = "/".join(part for part in (key.strip("/"), run_id) if part)
+        client = get_s3_client()
+        uploaded = 0
+        for artifact in sorted(work_dir.rglob("*")):
+            relative = artifact.relative_to(work_dir)
+            if not artifact.is_file() or (relative.parts and relative.parts[0] == "checkpoints"):
+                continue
+            object_key = f"{prefix}/{relative.as_posix()}" if prefix else relative.as_posix()
+            client.upload_file(str(artifact), bucket, object_key)
+            uploaded += 1
+        logger.info("uploaded %d artifacts to %s/%s", uploaded, upload_uri.rstrip("/"), run_id)
 
     if run is not None:
         import wandb
@@ -829,7 +927,7 @@ def print_dry_run(config: dict, tokens: int | None = None) -> None:
     device = pick_device(config["device"])
     torch_dtype = getattr(torch, config["dtype"])
     dims = {
-        "vocab_size": config["vocab_size"],
+        "vocab_size": resolve_vocab_size(config),
         "context_length": config["context_length"],
         "num_layers": config["num_layers"],
         "d_model": config["d_model"],
@@ -847,7 +945,7 @@ def print_dry_run(config: dict, tokens: int | None = None) -> None:
     console = Console()
     console.print(
         build_stats_table(
-            config.get("run_name") or "dry-run",
+            "dry-run",
             dims,
             batch_size,
             params,
@@ -955,7 +1053,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
 
-    output_dir: Path = config["output_dir"]
+    output_dir: Path = config["work_dir"]
     output_dir.mkdir(parents=True, exist_ok=True)
 
     stream_handler = logging.StreamHandler(sys.stdout)
@@ -971,13 +1069,15 @@ def main(argv: list[str] | None = None) -> int:
         force=True,
     )
 
+    logger.info("run id: %s", config["run_id"])
     logger.info("config: %s", config["config_path"])
     logger.info("dataset: %s", config["dataset"])
-    logger.info("tokenizer: %s", config["tokenizer_path"])
+    logger.info("tokenizer: %s", config["tokenizer"])
+    logger.info("work directory: %s", output_dir)
 
     try:
         train(config)
-    except (FileNotFoundError, KeyError, ValueError) as exc:
+    except (FileNotFoundError, NotADirectoryError, KeyError, TypeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 0
