@@ -7,8 +7,10 @@ Usage:
 ``model_dir`` is the experiment directory (e.g. ``experiments/lm-v1``) whose
 ``training/`` subdirectory holds ``config.json`` and ``checkpoints/``. The
 checkpoint file name is relative to that ``checkpoints/`` directory and defaults
-to ``final.pt``. Decoding is greedy (no temperature / nucleus sampling) and stops
-at ``<|endoftext|>`` or after ``--max-new-tokens`` tokens.
+to ``final.pt``. Decoding samples from the temperature-scaled softmax (``--temp``)
+truncated to the nucleus (``--top-p``); a ``--temp`` or ``--top-p`` of ``0`` or
+less means greedy. Generation stops at ``<|endoftext|>`` or after
+``--max-new-tokens`` tokens.
 """
 
 import argparse
@@ -53,14 +55,27 @@ def generate(
     max_new_tokens: int,
     context_length: int,
     device: str,
+    temp: float = 1.0,
+    top_p: float = 0.0,
 ) -> Iterator[int]:
     ids = tokenizer.encode(prompt)
     x = torch.tensor([ids], dtype=torch.long, device=device)
 
     for _ in range(max_new_tokens):
         logits = model(x[:, -context_length:])[:, -1, :]
-        next_id = int(logits.argmax(dim=-1))
+        if temp <= 0.0 or top_p <= 0.0:
+            next_id = int(logits.argmax(dim=-1))
+        else:
+            probs = torch.softmax(logits / temp, dim=-1)
+            sorted_probs, sorted_idx = torch.sort(probs, descending=True, dim=-1)
+            cum_probs = torch.cumsum(sorted_probs, dim=-1)
+
+            sorted_probs = sorted_probs.masked_fill((cum_probs - sorted_probs) >= top_p, 0.0)
+            choice = torch.multinomial(sorted_probs, num_samples=1)
+            next_id = int(sorted_idx.gather(-1, choice))
+
         yield next_id
+        # append prediction to the input sequence for the next iteration
         x = torch.cat([x, torch.tensor([[next_id]], dtype=torch.long, device=device)], dim=1)
 
 
@@ -73,6 +88,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--max-new-tokens", type=int, default=200, help="maximum tokens to generate (default: 200)")
     parser.add_argument("--device", default="auto", help="auto | cpu | cuda | mps (default: auto)")
+    parser.add_argument(
+        "--temp",
+        type=float,
+        default=1.0,
+        help="sampling temperature; 0 or less means greedy decoding (default: 1.0)",
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        default=0.0,
+        help="nucleus sampling threshold; 0 or less means greedy decoding (default: 0.0)",
+    )
     return parser.parse_args(argv)
 
 
@@ -117,6 +144,8 @@ def main(argv: list[str] | None = None) -> int:
         max_new_tokens=args.max_new_tokens,
         context_length=config["context_length"],
         device=device,
+        temp=args.temp,
+        top_p=args.top_p,
     )
 
     # Byte-level BPE tokens are raw bytes, so a character can span tokens. The
